@@ -1,4 +1,5 @@
 
+
 # -*- coding: utf-8 -*-
 import os, re, json, html, random, sys
 import urllib.parse
@@ -30,6 +31,13 @@ def finish():
 def clean(s):
     s = re.sub(r"<[^>]+>", " ", s)
     return html.unescape(re.sub(r"\s+", " ", s)).strip()
+
+def good_text(t):
+    """Проверка: нейросеть должна вернуть текст, а не JSON с ошибкой."""
+    if not t or len(t) < 100 or len(t) > 2500: return False
+    bad = ['"error"', "Payment Required", "pollen", "deprecation_notice", "<html", "<!DOCTYPE"]
+    if t.lstrip().startswith("{") or any(b in t for b in bad): return False
+    return True
 
 # ---------- Этап 1: список страниц ----------
 try:
@@ -66,9 +74,17 @@ log("Этап 3 (контент)", "✅" if len(body) > 100 else "⚠️", f"«{
 
 # ---------- Этап 4: генерация текста поста ----------
 def template_text():
-    sents = re.split(r"(?<=[.!?])\s+", body)[:3]
-    return (f"📢 {title}\n\n" + "\n".join("• " + s for s in sents) +
-            f"\n\n🔗 Подробнее: {page}\n#PAVRUS #АВоборудование #конференцзал")
+    sents = [s.strip() for s in re.split(r"(?<=[.!?])\s+", body) if len(s.strip()) > 30][:4]
+    hook = random.choice([
+        f"🚀 PAVRUS: {title}",
+        f"💡 Интересное решение — {title}",
+        f"📢 Новое на pavrus.ru: {title}",
+    ])
+    bullets = "\n".join("▪️ " + s for s in sents) if sents else "▪️ " + body[:400]
+    return (f"{hook}\n\n{bullets}\n\n"
+            "🏢 Оборудование для конференц-залов, переговорных и ситуационных центров — подбор и монтаж под ключ.\n"
+            f"📩 Консультация: pavrus.ru\n🔗 Подробнее: {page}\n\n"
+            "#PAVRUS #АВоборудование #видеоконференции #конференцзал")
 
 text, src = None, ""
 prompt = (f"Напиши привлекательный пост для ВКонтакте на русском по материалу: {title}. {body} "
@@ -76,15 +92,14 @@ prompt = (f"Напиши привлекательный пост для ВКон
 try:
     j = requests.post("https://text.pollinations.ai/openai", timeout=120,
                       json={"model": "openai", "messages": [{"role": "user", "content": prompt}]}).json()
-    text = (j["choices"][0]["message"]["content"] or "").strip()
-    src = "LLM Pollinations"
+    t = (j.get("choices", [{}])[0].get("message", {}).get("content") or "").strip()
+    if good_text(t): text, src = t, "LLM Pollinations"
 except Exception:
     pass
 if not text:
     try:
-        text = requests.get("https://text.pollinations.ai/" + urllib.parse.quote(prompt), timeout=120).text.strip()
-        if text and len(text) > 100: src = "LLM Pollinations (GET)"
-        else: text = None
+        t = requests.get("https://text.pollinations.ai/" + urllib.parse.quote(prompt), timeout=120).text.strip()
+        if good_text(t): text, src = t, "LLM Pollinations (GET)"
     except Exception:
         pass
 if not text:
@@ -121,7 +136,7 @@ try:
         gid = str(vk("groups.getById", group_id=gid)[0]["id"])
     att = ""
     if img_bytes:
-        try: # пробуем загрузить фото; ВК может отказать токену сообщества — известное ограничение
+        try:
             up = vk("photos.getWallUploadServer", group_id=gid)["upload_url"]
             j = requests.post(up, files={"photo": ("img.jpg", img_bytes, "image/jpeg")}, timeout=120).json()
             p = vk("photos.saveWallPhoto", group_id=gid, photo=j["photo"], server=j["server"], hash=j["hash"])[0]
