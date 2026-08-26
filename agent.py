@@ -119,7 +119,7 @@ try:
         j = requests.post(up, files={"photo": ("img.jpg", img_bytes, "image/jpeg")}, timeout=120).json()
         p = vk("photos.saveWallPhoto", group_id=gid, photo=j["photo"], server=j["server"], hash=j["hash"])[0]
         att = f"photo{p['owner_id']}_{p['id']}"
-    post = vk("wall.post", owner_id="-" + gid, from_group=1,
+    post = vk("wall.post", owner_id="-" + gid,
               message=text, attachments=att, random_id=random.randint(1, 2**31))
     link = f"https://vk.com/wall-{gid}_{post['post_id']}"
     log("Этап 6 (публикация ВК)", "✅", link)
