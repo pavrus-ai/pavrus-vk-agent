@@ -20,7 +20,8 @@ BLACKLIST = ["Корзина","Кабинет","Избранные","Сравн�
              "Санкт-Петербург","Москва","Новосибирск","Краснодар","Красноярск","8 (800)","info@",
              "pavrus.ru","Показать еще","Ваш город","Да, спасибо","Нет, другой","Выбрать автоматически",
              "Бесплатная доставка","Главная","HTDZ","AUDAC","CVID","CHIAYO","Restmoment","радиогид",
-             "PAVRUS PA-","PAVRUS ABK","E-Desk","таблички","громкоговорители","инфракрасная"]
+             "PAVRUS PA-","PAVRUS ABK","E-Desk","таблички","громкоговорители","инфракрасная",
+             "@context","@type","schema.org","description\":","Обратная связь"]
 
 report = []
 def log(stage, status, msg):
@@ -41,7 +42,7 @@ def clean(s):
 
 def good_text(t):
     if not t or len(t) < 350: return False
-    bad = ['"error"', "Payment Required", "pollen", "deprecation_notice", "<html", "<!DOCTYPE", "{"]
+    bad = ['"error"', "Payment Required", "pollen", "deprecation_notice", "<html", "<!DOCTYPE", "{", "@context"]
     if t.lstrip().startswith("{") or any(b in t for b in bad): return False
     return True
 
@@ -57,7 +58,7 @@ def llm_chat(url, headers, model, prompt):
                             "max_tokens": 1024, "temperature": 0.7}).json()
     return (j["choices"][0]["message"]["content"] or "").strip()
 
-# ---------- Этап 1: список страниц (только /catalog/, /help/news/, /help/articles/) ----------
+# ---------- Этап 1: список страниц ----------
 try:
     xml = requests.get(SITEMAP, timeout=60, headers=UA).text
     locs = re.findall(r"<loc>\s*(.*?)\s*</loc>", xml)
@@ -85,6 +86,10 @@ for attempt in range(5):
     m = re.search(r"<h1[^>]*>(.*?)</h1>", r, re.S | re.I)
     title = clean(m.group(1)) if m else ""
     tail = r[m.end():] if m else r
+    # вырезаем служебное: скрипты, стили, комментарии, JSON-разметку
+    tail = re.sub(r"<script.*?</script>", " ", tail, flags=re.S | re.I)
+    tail = re.sub(r"<style.*?</style>", " ", tail, flags=re.S | re.I)
+    tail = re.sub(r"<!--.*?-->", " ", tail, flags=re.S)
     for marker in ["Назад к списку", "Нужна консультация", "Подробная информация"]:
         i = tail.find(marker)
         if i != -1: tail = tail[:i]
@@ -92,7 +97,8 @@ for attempt in range(5):
     raw = " ".join(clean(p) for p in paras)
     if len(raw) < 100: raw = clean(tail)
     keep = [s.strip() for s in re.split(r"(?<=[.!?])\s+", raw)
-            if len(s.strip()) >= 40 and not any(b in s for b in BLACKLIST)]
+            if len(s.strip()) >= 40 and "{" not in s and '"' not in s
+            and not any(b in s for b in BLACKLIST)]
     body = " ".join(keep)[:1500]
     if title and "не найдена" not in title.lower() and len(body) > 100:
         break
@@ -103,7 +109,8 @@ log("Этап 3 (контент)", "✅" if len(body) > 100 else "⚠️", f"«{
 def template_text():
     sents = [s for s in re.split(r"(?<=[.!?])\s+", body) if 40 < len(s) < 220][:4]
     hook = random.choice([f"🚀 PAVRUS: {title}", f"💡 Интересное решение — {title}", f"📢 Новое на pavrus.ru: {title}"])
-    tail = f"\n\n🏢 Оборудование для конференц-залов и переговорных\n📩 Консультация: pavrus.ru\n🔗 Подробнее: {page}\n#PAVRUS #АВоборудование"
+    tail = (f"\n\n🔗 Подробнее: {page}\n🏢 Оборудование для конференц-залов и переговорных\n"
+            f"📩 Консультация: pavrus.ru\n#PAVRUS #АВоборудование")
     for n in range(len(sents), 0, -1):
         text = f"{hook}\n\n" + "\n".join("▪️ " + s for s in sents[:n]) + tail
         if 350 <= len(text) <= 700: return text
@@ -113,7 +120,7 @@ def template_text():
 
 prompt = (f"Проанализируй материал и напиши пост для ВКонтакте на русском: {title}. {body} "
           f"Требования: 350-700 символов, живой маркетинговый тон, 2-4 коротких абзаца или пункта с эмодзи, "
-          f"в конце ссылка {page} и 2-3 хэштега. Без служебного текста и меню.")
+          f"в конце ссылка {page} и 2-3 хэштега. Без служебного текста, JSON и меню.")
 text, src = None, ""
 if GROQ_KEY:
     try:
@@ -156,7 +163,7 @@ try:
 except Exception as e:
     log("Этап 5 (картинка)", "⚠️", str(e))
 
-# ---------- Этап 6: публикация в ВК (фото -> docs -> превью) ----------
+# ---------- Этап 6: публикация в ВК ----------
 def vk(method, **kw):
     kw.update(access_token=VK_TOKEN, v="5.131")
     j = requests.post(f"https://api.vk.com/method/{method}", data=kw, timeout=60).json()
@@ -199,4 +206,3 @@ except Exception as e:
     log("Этап 6 (публикация ВК)", "❌", str(e))
 
 finish()
-
