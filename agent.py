@@ -1,8 +1,5 @@
 
-
-
 # -*- coding: utf-8 -*-
-""" ИИ-агент: случайная страница pavrus.ru -> текст + картинка -> пост в ВК -> отчёт в Telegram """
 import os, re, json, html, random, sys
 import urllib.parse
 import requests
@@ -13,7 +10,7 @@ HISTORY = "history.json"
 UA = {"User-Agent": "Mozilla/5.0 (pavrus-vk-agent)"}
 
 VK_TOKEN = os.getenv("VK_TOKEN", "")
-VK_GROUP = os.getenv("VK_GROUP_ID", "") # числовой id или короткое имя (vk.com/имя)
+VK_GROUP = os.getenv("VK_GROUP_ID", "")
 TG_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TG_CHAT = os.getenv("TELEGRAM_CHAT_ID", "")
 
@@ -48,24 +45,24 @@ try:
 except Exception as e:
     log("Этап 1 (sitemap)", "❌", str(e)); finish(); sys.exit(1)
 
-# ---------- Этап 2: случайная страница (без повторов) ----------
+# ---------- Этапы 2-3: случайная страница + контент (пропуск 404) ----------
 try:
     hist = set(json.load(open(HISTORY, encoding="utf-8"))) if os.path.exists(HISTORY) else set()
 except Exception:
     hist = set()
-page = random.choice([u for u in urls if u not in hist] or urls)
-log("Этап 2 (случайная страница)", "✅", page)
 
-# ---------- Этап 3: извлечение контента ----------
-try:
+title = body = page = ""
+for attempt in range(5):
+    page = random.choice([u for u in urls if u not in hist] or urls)
     r = requests.get(page, timeout=60, headers=UA).text
     m = re.search(r"<h1[^>]*>(.*?)</h1>", r, re.S | re.I)
-    title = clean(m.group(1)) if m else page.rstrip("/").split("/")[-1]
+    title = clean(m.group(1)) if m else ""
     paras = [clean(p) for p in re.findall(r"<p[^>]*>(.*?)</p>", r, re.S | re.I)]
     body = " ".join(p for p in paras if len(p) > 40)[:2000]
-    log("Этап 3 (контент)", "✅", f"«{title}», текста: {len(body)} симв.")
-except Exception as e:
-    log("Этап 3 (контент)", "❌", str(e)); finish(); sys.exit(1)
+    if title and "не найдена" not in title.lower() and len(body) > 100:
+        break
+log("Этап 2 (случайная страница)", "✅", page)
+log("Этап 3 (контент)", "✅" if len(body) > 100 else "⚠️", f"«{title}», текста: {len(body)} симв.")
 
 # ---------- Этап 4: генерация текста поста ----------
 def template_text():
@@ -74,30 +71,39 @@ def template_text():
             f"\n\n🔗 Подробнее: {page}\n#PAVRUS #АВоборудование #конференцзал")
 
 text, src = None, ""
-try: # бесплатный LLM Pollinations (без ключа)
+prompt = (f"Напиши привлекательный пост для ВКонтакте на русском по материалу: {title}. {body} "
+          f"Формат: 4-6 коротких пунктов с эмодзи, в конце хэштеги и ссылка {page}. До 1000 символов.")
+try:
     j = requests.post("https://text.pollinations.ai/openai", timeout=120,
-                      json={"model": "openai", "messages": [{"role": "user", "content":
-        f"Напиши привлекательный пост для ВКонтакте на русском по материалу: {title}. {body} "
-        f"Формат: 4-6 коротких пунктов с эмодзи, в конце хэштеги и ссылка {page}. До 1000 символов."}]}).json()
+                      json={"model": "openai", "messages": [{"role": "user", "content": prompt}]}).json()
     text = (j["choices"][0]["message"]["content"] or "").strip()
     src = "LLM Pollinations"
 except Exception:
     pass
 if not text:
+    try:
+        text = requests.get("https://text.pollinations.ai/" + urllib.parse.quote(prompt), timeout=120).text.strip()
+        if text and len(text) > 100: src = "LLM Pollinations (GET)"
+        else: text = None
+    except Exception:
+        pass
+if not text:
     text, src = template_text(), "шаблон (LLM недоступен)"
-log("Этап 4 (текст поста)", "✅" if src == "LLM Pollinations" else "⚠️", f"источник: {src}, {len(text)} симв.")
+if page not in text:
+    text += f"\n\n🔗 Подробнее: {page}"
+log("Этап 4 (текст поста)", "✅" if "LLM" in src else "⚠️", f"источник: {src}, {len(text)} симв.")
 
 # ---------- Этап 5: генерация картинки ----------
 img_bytes = b""
 try:
-    prompt = urllib.parse.quote(f"Professional photo: {title}, modern conference room, AV equipment, photorealistic")
-    img_url = f"https://image.pollinations.ai/prompt/{prompt}?width=1200&height=800&nologo=true&seed={random.randint(1, 999999)}"
+    p = urllib.parse.quote(f"Professional photo: {title}, modern conference room, AV equipment, photorealistic")
+    img_url = f"https://image.pollinations.ai/prompt/{p}?width=1200&height=800&nologo=true&seed={random.randint(1, 999999)}"
     resp = requests.get(img_url, timeout=180)
     if resp.headers.get("content-type", "").startswith("image"):
         img_bytes = resp.content
         log("Этап 5 (картинка)", "✅", f"{len(img_bytes)} байт")
     else:
-        log("Этап 5 (картинка)", "⚠️", "сервер вернул не изображение — пост без картинки")
+        log("Этап 5 (картинка)", "⚠️", "сервер вернул не изображение")
 except Exception as e:
     log("Этап 5 (картинка)", "⚠️", str(e))
 
@@ -105,20 +111,24 @@ except Exception as e:
 def vk(method, **kw):
     kw.update(access_token=VK_TOKEN, v="5.131")
     j = requests.post(f"https://api.vk.com/method/{method}", data=kw, timeout=60).json()
-    if "error" in j: raise RuntimeError(j["error"].get("error_msg"))
+    if "error" in j: raise RuntimeError(f"[{j['error']['error_code']}] {j['error'].get('error_msg')}")
     return j["response"]
 
 try:
     if not VK_TOKEN: raise RuntimeError("не задан VK_TOKEN в Secrets")
     gid = VK_GROUP
-    if not gid.isdigit(): # короткое имя -> числовой id
+    if not gid.isdigit():
         gid = str(vk("groups.getById", group_id=gid)[0]["id"])
     att = ""
     if img_bytes:
-        up = vk("photos.getWallUploadServer", group_id=gid)["upload_url"]
-        j = requests.post(up, files={"photo": ("img.jpg", img_bytes, "image/jpeg")}, timeout=120).json()
-        p = vk("photos.saveWallPhoto", group_id=gid, photo=j["photo"], server=j["server"], hash=j["hash"])[0]
-        att = f"photo{p['owner_id']}_{p['id']}"
+        try: # пробуем загрузить фото; ВК может отказать токену сообщества — известное ограничение
+            up = vk("photos.getWallUploadServer", group_id=gid)["upload_url"]
+            j = requests.post(up, files={"photo": ("img.jpg", img_bytes, "image/jpeg")}, timeout=120).json()
+            p = vk("photos.saveWallPhoto", group_id=gid, photo=j["photo"], server=j["server"], hash=j["hash"])[0]
+            att = f"photo{p['owner_id']}_{p['id']}"
+            log("Этап 6а (загрузка фото)", "✅", "картинка прикреплена")
+        except Exception as e:
+            log("Этап 6а (загрузка фото)", "⚠️", f"ВК не даёт грузить фото токеном сообщества — пост выйдет со ссылкой (превью с фото сайта): {e}")
     post = vk("wall.post", owner_id="-" + gid,
               message=text, attachments=att, random_id=random.randint(1, 2**31))
     link = f"https://vk.com/wall-{gid}_{post['post_id']}"
