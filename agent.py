@@ -1,5 +1,4 @@
 
-
 # -*- coding: utf-8 -*-
 import os, re, json, html, random, sys
 import urllib.parse
@@ -14,6 +13,13 @@ VK_TOKEN = os.getenv("VK_TOKEN", "")
 VK_GROUP = os.getenv("VK_GROUP_ID", "")
 TG_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TG_CHAT = os.getenv("TELEGRAM_CHAT_ID", "")
+GIGA_KEY = os.getenv("GIGACHAT_KEY", "")
+
+BLACKLIST = ["Корзина","Кабинет","Избранные","Сравнение","Каталог","Войти","Заказать звонок",
+             "Санкт-Петербург","Москва","Новосибирск","Краснодар","Красноярск","8 (800)","info@",
+             "pavrus.ru","Показать еще","Ваш город","Да, спасибо","Нет, другой","Выбрать автоматически",
+             "Бесплатная доставка","Главная","HTDZ","AUDAC","CVID","CHIAYO","Restmoment","радиогид",
+             "PAVRUS PA-","PAVRUS ABK","E-Desk","таблички","громкоговорители","инфракрасная"]
 
 report = []
 def log(stage, status, msg):
@@ -33,13 +39,18 @@ def clean(s):
     return html.unescape(re.sub(r"\s+", " ", s)).strip()
 
 def good_text(t):
-    """Проверка: нейросеть должна вернуть текст, а не JSON с ошибкой."""
-    if not t or len(t) < 100 or len(t) > 2500: return False
-    bad = ['"error"', "Payment Required", "pollen", "deprecation_notice", "<html", "<!DOCTYPE"]
+    if not t or len(t) < 350: return False
+    bad = ['"error"', "Payment Required", "pollen", "deprecation_notice", "<html", "<!DOCTYPE", "{"]
     if t.lstrip().startswith("{") or any(b in t for b in bad): return False
     return True
 
-# ---------- Этап 1: список страниц ----------
+def trim700(t):
+    if len(t) <= 700: return t
+    cut = t[:700]
+    i = max(cut.rfind("."), cut.rfind("!"), cut.rfind("?"), cut.rfind("\n"))
+    return (cut[:i+1] if i > 350 else cut).rstrip()
+
+# ---------- Этап 1: список страниц (только /catalog/, /help/news/, /help/articles/) ----------
 try:
     xml = requests.get(SITEMAP, timeout=60, headers=UA).text
     locs = re.findall(r"<loc>\s*(.*?)\s*</loc>", xml)
@@ -47,13 +58,14 @@ try:
     urls = []
     for sm in sitemaps:
         x = requests.get(sm, timeout=60, headers=UA).text
-        urls += [u for u in re.findall(r"<loc>\s*(.*?)\s*</loc>", x) if "/help/" in u]
+        urls += [u for u in re.findall(r"<loc>\s*(.*?)\s*</loc>", x)
+                 if any(p in u for p in ["/catalog/", "/help/news/", "/help/articles/"])]
     urls = sorted(set(urls))
     log("Этап 1 (sitemap)", "✅", f"страниц найдено: {len(urls)}")
 except Exception as e:
     log("Этап 1 (sitemap)", "❌", str(e)); finish(); sys.exit(1)
 
-# ---------- Этапы 2-3: случайная страница + контент (пропуск 404) ----------
+# ---------- Этапы 2-3: случайная страница + ЧИСТЫЙ контент ----------
 try:
     hist = set(json.load(open(HISTORY, encoding="utf-8"))) if os.path.exists(HISTORY) else set()
 except Exception:
@@ -65,48 +77,57 @@ for attempt in range(5):
     r = requests.get(page, timeout=60, headers=UA).text
     m = re.search(r"<h1[^>]*>(.*?)</h1>", r, re.S | re.I)
     title = clean(m.group(1)) if m else ""
-    paras = [clean(p) for p in re.findall(r"<p[^>]*>(.*?)</p>", r, re.S | re.I)]
-    body = " ".join(p for p in paras if len(p) > 40)[:2000]
+    tail = r[m.end():] if m else r
+    for marker in ["Назад к списку", "Нужна консультация", "Подробная информация"]:
+        i = tail.find(marker)
+        if i != -1: tail = tail[:i]
+    paras = re.findall(r"<p[^>]*>(.*?)</p>", tail, re.S | re.I)
+    raw = " ".join(clean(p) for p in paras)
+    if len(raw) < 100: raw = clean(tail)
+    keep = [s.strip() for s in re.split(r"(?<=[.!?])\s+", raw)
+            if len(s.strip()) >= 40 and not any(b in s for b in BLACKLIST)]
+    body = " ".join(keep)[:1500]
     if title and "не найдена" not in title.lower() and len(body) > 100:
         break
 log("Этап 2 (случайная страница)", "✅", page)
-log("Этап 3 (контент)", "✅" if len(body) > 100 else "⚠️", f"«{title}», текста: {len(body)} симв.")
+log("Этап 3 (контент)", "✅" if len(body) > 100 else "⚠️", f"«{title}», чистого текста: {len(body)} симв.")
 
-# ---------- Этап 4: генерация текста поста ----------
+# ---------- Этап 4: ИИ-текст поста (350-700 символов) ----------
 def template_text():
-    sents = [s.strip() for s in re.split(r"(?<=[.!?])\s+", body) if len(s.strip()) > 30][:4]
-    hook = random.choice([
-        f"🚀 PAVRUS: {title}",
-        f"💡 Интересное решение — {title}",
-        f"📢 Новое на pavrus.ru: {title}",
-    ])
-    bullets = "\n".join("▪️ " + s for s in sents) if sents else "▪️ " + body[:400]
-    return (f"{hook}\n\n{bullets}\n\n"
-            "🏢 Оборудование для конференц-залов, переговорных и ситуационных центров — подбор и монтаж под ключ.\n"
-            f"📩 Консультация: pavrus.ru\n🔗 Подробнее: {page}\n\n"
-            "#PAVRUS #АВоборудование #видеоконференции #конференцзал")
+    sents = [s for s in re.split(r"(?<=[.!?])\s+", body) if 40 < len(s) < 220][:4]
+    hook = random.choice([f"🚀 PAVRUS: {title}", f"💡 Интересное решение — {title}", f"📢 Новое на pavrus.ru: {title}"])
+    tail = f"\n\n🏢 Оборудование для конференц-залов и переговорных\n📩 Консультация: pavrus.ru\n🔗 Подробнее: {page}\n#PAVRUS #АВоборудование"
+    for n in range(len(sents), 0, -1):
+        text = f"{hook}\n\n" + "\n".join("▪️ " + s for s in sents[:n]) + tail
+        if 350 <= len(text) <= 700: return text
+    text = f"{hook}\n\n▪️ {body[:500]}{tail}"
+    if len(text) < 350: text += f"\n\nПрофессиональное решение для бизнеса."
+    return text[:700] if len(text) > 700 else text
 
+prompt = (f"Проанализируй материал и напиши пост для ВКонтакте на русском: {title}. {body} "
+          f"Требования: 350-700 символов, живой маркетинговый тон, 2-4 коротких абзаца или пункта с эмодзи, "
+          f"в конце ссылка {page} и 2-3 хэштега. Без служебного текста и меню.")
 text, src = None, ""
-prompt = (f"Напиши привлекательный пост для ВКонтакте на русском по материалу: {title}. {body} "
-          f"Формат: 4-6 коротких пунктов с эмодзи, в конце хэштеги и ссылка {page}. До 1000 символов.")
-try:
-    j = requests.post("https://text.pollinations.ai/openai", timeout=120,
-                      json={"model": "openai", "messages": [{"role": "user", "content": prompt}]}).json()
-    t = (j.get("choices", [{}])[0].get("message", {}).get("content") or "").strip()
-    if good_text(t): text, src = t, "LLM Pollinations"
-except Exception:
-    pass
+if GIGA_KEY:
+    try:
+        j = requests.post("https://gigachat.devices.sberbank.ru/api/v1/chat/completions", timeout=120,
+                          headers={"Authorization": f"Bearer {GIGA_KEY}", "Content-Type": "application/json"},
+                          json={"model": "GigaChat", "messages": [{"role": "user", "content": prompt}], "max_tokens": 1024}).json()
+        t = (j["choices"][0]["message"]["content"] or "").strip()
+        if good_text(t): text, src = t, "GigaChat"
+    except Exception: pass
 if not text:
     try:
-        t = requests.get("https://text.pollinations.ai/" + urllib.parse.quote(prompt), timeout=120).text.strip()
-        if good_text(t): text, src = t, "LLM Pollinations (GET)"
-    except Exception:
-        pass
+        j = requests.post("https://text.pollinations.ai/openai", timeout=120,
+                          json={"model": "openai", "messages": [{"role": "user", "content": prompt}]}).json()
+        t = (j.get("choices", [{}])[0].get("message", {}).get("content") or "").strip()
+        if good_text(t): text, src = t, "LLM Pollinations"
+    except Exception: pass
 if not text:
     text, src = template_text(), "шаблон (LLM недоступен)"
-if page not in text:
-    text += f"\n\n🔗 Подробнее: {page}"
-log("Этап 4 (текст поста)", "✅" if "LLM" in src else "⚠️", f"источник: {src}, {len(text)} симв.")
+if page not in text: text += f"\n\n🔗 Подробнее: {page}"
+text = trim700(text)
+log("Этап 4 (текст поста)", "✅" if src != "шаблон (LLM недоступен)" else "⚠️", f"источник: {src}, {len(text)} симв.")
 
 # ---------- Этап 5: генерация картинки ----------
 img_bytes = b""
@@ -122,7 +143,7 @@ try:
 except Exception as e:
     log("Этап 5 (картинка)", "⚠️", str(e))
 
-# ---------- Этап 6: публикация в ВК ----------
+# ---------- Этап 6: публикация в ВК (фото -> docs -> превью) ----------
 def vk(method, **kw):
     kw.update(access_token=VK_TOKEN, v="5.131")
     j = requests.post(f"https://api.vk.com/method/{method}", data=kw, timeout=60).json()
@@ -134,16 +155,27 @@ try:
     gid = VK_GROUP
     if not gid.isdigit():
         gid = str(vk("groups.getById", group_id=gid)[0]["id"])
-    att = ""
+    att, how = "", ""
     if img_bytes:
         try:
             up = vk("photos.getWallUploadServer", group_id=gid)["upload_url"]
             j = requests.post(up, files={"photo": ("img.jpg", img_bytes, "image/jpeg")}, timeout=120).json()
             p = vk("photos.saveWallPhoto", group_id=gid, photo=j["photo"], server=j["server"], hash=j["hash"])[0]
-            att = f"photo{p['owner_id']}_{p['id']}"
-            log("Этап 6а (загрузка фото)", "✅", "картинка прикреплена")
-        except Exception as e:
-            log("Этап 6а (загрузка фото)", "⚠️", f"ВК не даёт грузить фото токеном сообщества — пост выйдет со ссылкой (превью с фото сайта): {e}")
+            att, how = f"photo{p['owner_id']}_{p['id']}", "фото"
+        except Exception:
+            for m in ["docs.getWallUploadServer", "docs.getUploadServer"]:
+                try:
+                    up = vk(m, group_id=gid)["upload_url"]
+                    j = requests.post(up, files={"file": ("img.jpg", img_bytes, "image/jpeg")}, timeout=120).json()
+                    d = vk("docs.save", file=j["file"])["doc"]
+                    att, how = f"doc{d['owner_id']}_{d['id']}", "документ-картинка"
+                    break
+                except Exception:
+                    continue
+        if att:
+            log("Этап 6а (загрузка фото)", "✅", f"сгенерированная картинка прикреплена как {how}")
+        else:
+            log("Этап 6а (загрузка фото)", "⚠️", "ВК отклонил загрузку — пост выйдет со ссылкой (превью с фото сайта)")
     post = vk("wall.post", owner_id="-" + gid,
               message=text, attachments=att, random_id=random.randint(1, 2**31))
     link = f"https://vk.com/wall-{gid}_{post['post_id']}"
