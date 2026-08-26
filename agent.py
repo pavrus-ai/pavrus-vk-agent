@@ -13,7 +13,8 @@ VK_TOKEN = os.getenv("VK_TOKEN", "")
 VK_GROUP = os.getenv("VK_GROUP_ID", "")
 TG_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TG_CHAT = os.getenv("TELEGRAM_CHAT_ID", "")
-GIGA_KEY = os.getenv("GIGACHAT_KEY", "")
+GROQ_KEY = os.getenv("GROQ_KEY", "")
+OR_KEY = os.getenv("OPENROUTER_KEY", "")
 
 BLACKLIST = ["Корзина","Кабинет","Избранные","Сравнение","Каталог","Войти","Заказать звонок",
              "Санкт-Петербург","Москва","Новосибирск","Краснодар","Красноярск","8 (800)","info@",
@@ -49,6 +50,12 @@ def trim700(t):
     cut = t[:700]
     i = max(cut.rfind("."), cut.rfind("!"), cut.rfind("?"), cut.rfind("\n"))
     return (cut[:i+1] if i > 350 else cut).rstrip()
+
+def llm_chat(url, headers, model, prompt):
+    j = requests.post(url, timeout=120, headers=headers,
+                      json={"model": model, "messages": [{"role": "user", "content": prompt}],
+                            "max_tokens": 1024, "temperature": 0.7}).json()
+    return (j["choices"][0]["message"]["content"] or "").strip()
 
 # ---------- Этап 1: список страниц (только /catalog/, /help/news/, /help/articles/) ----------
 try:
@@ -101,20 +108,26 @@ def template_text():
         text = f"{hook}\n\n" + "\n".join("▪️ " + s for s in sents[:n]) + tail
         if 350 <= len(text) <= 700: return text
     text = f"{hook}\n\n▪️ {body[:500]}{tail}"
-    if len(text) < 350: text += f"\n\nПрофессиональное решение для бизнеса."
+    if len(text) < 350: text += "\n\nПрофессиональное решение для бизнеса."
     return text[:700] if len(text) > 700 else text
 
 prompt = (f"Проанализируй материал и напиши пост для ВКонтакте на русском: {title}. {body} "
           f"Требования: 350-700 символов, живой маркетинговый тон, 2-4 коротких абзаца или пункта с эмодзи, "
           f"в конце ссылка {page} и 2-3 хэштега. Без служебного текста и меню.")
 text, src = None, ""
-if GIGA_KEY:
+if GROQ_KEY:
     try:
-        j = requests.post("https://gigachat.devices.sberbank.ru/api/v1/chat/completions", timeout=120,
-                          headers={"Authorization": f"Bearer {GIGA_KEY}", "Content-Type": "application/json"},
-                          json={"model": "GigaChat", "messages": [{"role": "user", "content": prompt}], "max_tokens": 1024}).json()
-        t = (j["choices"][0]["message"]["content"] or "").strip()
-        if good_text(t): text, src = t, "GigaChat"
+        t = llm_chat("https://api.groq.com/openai/v1/chat/completions",
+                     {"Authorization": f"Bearer {GROQ_KEY}", "Content-Type": "application/json"},
+                     "llama-3.3-70b-versatile", prompt)
+        if good_text(t): text, src = t, "Groq LLM"
+    except Exception: pass
+if not text and OR_KEY:
+    try:
+        t = llm_chat("https://openrouter.ai/api/v1/chat/completions",
+                     {"Authorization": f"Bearer {OR_KEY}", "Content-Type": "application/json"},
+                     "meta-llama/llama-3.1-8b-instruct:free", prompt)
+        if good_text(t): text, src = t, "OpenRouter LLM"
     except Exception: pass
 if not text:
     try:
@@ -127,7 +140,7 @@ if not text:
     text, src = template_text(), "шаблон (LLM недоступен)"
 if page not in text: text += f"\n\n🔗 Подробнее: {page}"
 text = trim700(text)
-log("Этап 4 (текст поста)", "✅" if src != "шаблон (LLM недоступен)" else "⚠️", f"источник: {src}, {len(text)} симв.")
+log("Этап 4 (текст поста)", "✅" if "LLM" in src or "Groq" in src else "⚠️", f"источник: {src}, {len(text)} симв.")
 
 # ---------- Этап 5: генерация картинки ----------
 img_bytes = b""
@@ -186,3 +199,4 @@ except Exception as e:
     log("Этап 6 (публикация ВК)", "❌", str(e))
 
 finish()
+
