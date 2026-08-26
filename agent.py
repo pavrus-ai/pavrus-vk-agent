@@ -1,3 +1,4 @@
+
 # -*- coding: utf-8 -*-
 import os, re, json, html, random, sys
 import urllib.parse
@@ -15,12 +16,12 @@ TG_CHAT = os.getenv("TELEGRAM_CHAT_ID", "")
 GROQ_KEY = os.getenv("GROQ_KEY", "")
 OR_KEY = os.getenv("OPENROUTER_KEY", "")
 
-BLACKLIST = ["Корзина","Кабинет","Избранные","Сравнение","Каталог","Войти","Заказать звонок",
-             "Санкт-Петербург","Москва","Новосибирск","Краснодар","Красноярск","8 (800)","info@",
-             "pavrus.ru","Показать еще","Ваш город","Да, спасибо","Нет, другой","Выбрать автоматически",
-             "Бесплатная доставка","Главная","HTDZ","AUDAC","CVID","CHIAYO","Restmoment","радиогид",
-             "PAVRUS PA-","PAVRUS ABK","E-Desk","таблички","громкоговорители","инфракрасная",
-             "@context","@type","schema.org","description\":","Обратная связь"]
+BLACKLIST = ["Корзина", "Кабинет", "Избранные", "Сравнение", "Каталог", "Войти", "Заказать звонок",
+             "Санкт-Петербург", "Москва", "Новосибирск", "Краснодар", "Красноярск", "8 (800)", "info@",
+             "pavrus.ru", "Показать еще", "Ваш город", "Да, спасибо", "Нет, другой", "Выбрать автоматически",
+             "Бесплатная доставка", "Главная", "HTDZ", "AUDAC", "CVID", "CHIAYO", "Restmoment", "радиогид",
+             "PAVRUS PA-", "PAVRUS ABK", "E-Desk", "таблички", "громкоговорители", "инфракрасная",
+             "@context", "@type", "schema.org", 'description":', "Обратная связь"]
 
 report = []
 def log(stage, status, msg):
@@ -33,23 +34,27 @@ def finish():
         try:
             requests.post(f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage",
                           json={"chat_id": TG_CHAT, "text": "\n".join(report)}, timeout=30)
-        except Exception: pass
+        except Exception:
+            pass
 
 def clean(s):
     s = re.sub(r"<[^>]+>", " ", s)
     return html.unescape(re.sub(r"\s+", " ", s)).strip()
 
 def good_text(t):
-    if not t or len(t) < 350: return False
+    if not t or len(t) < 350:
+        return False
     bad = ['"error"', "Payment Required", "pollen", "deprecation_notice", "<html", "<!DOCTYPE", "{", "@context"]
-    if t.lstrip().startswith("{") or any(b in t for b in bad): return False
+    if t.lstrip().startswith("{") or any(b in t for b in bad):
+        return False
     return True
 
 def trim700(t):
-    if len(t) <= 700: return t
+    if len(t) <= 700:
+        return t
     cut = t[:700]
     i = max(cut.rfind("."), cut.rfind("!"), cut.rfind("?"), cut.rfind("\n"))
-    return (cut[:i+1] if i > 350 else cut).rstrip()
+    return (cut[:i + 1] if i > 350 else cut).rstrip()
 
 def llm_chat(url, headers, model, prompt):
     j = requests.post(url, timeout=120, headers=headers,
@@ -65,9 +70,11 @@ try:
     urls = []
     for sm in sitemaps:
         x = requests.get(sm, timeout=60, headers=UA).text
-        urls += [u for u in re.findall(r"<loc>\s*(.*?)\s</loc>", x)
+        urls += [u for u in re.findall(r"<loc>\s*(.*?)\s*</loc>", x)
                  if any(p in u for p in ["/catalog/", "/help/news/", "/help/articles/"])]
     urls = sorted(set(urls))
+    if not urls:
+        raise RuntimeError("не найдено ни одной страницы в разрешённых разделах")
     log("Этап 1 (sitemap)", "✅", f"страниц найдено: {len(urls)}")
 except Exception as e:
     log("Этап 1 (sitemap)", "❌", str(e)); finish(); sys.exit(1)
@@ -90,10 +97,12 @@ for attempt in range(5):
     tail = re.sub(r"<!--.*?-->", " ", tail, flags=re.S)
     for marker in ["Назад к списку", "Нужна консультация", "Подробная информация"]:
         i = tail.find(marker)
-        if i != -1: tail = tail[:i]
+        if i != -1:
+            tail = tail[:i]
     paras = re.findall(r"<p[^>]*>(.*?)</p>", tail, re.S | re.I)
     raw = " ".join(clean(p) for p in paras)
-    if len(raw) < 100: raw = clean(tail)
+    if len(raw) < 100:
+        raw = clean(tail)
     keep = [s.strip() for s in re.split(r"(?<=[.!?])\s+", raw)
             if len(s.strip()) >= 40 and "{" not in s and '"' not in s
             and not any(b in s for b in BLACKLIST)]
@@ -111,9 +120,11 @@ def template_text():
             f"📩 Консультация: pavrus.ru\n#PAVRUS #АВоборудование")
     for n in range(len(sents), 0, -1):
         text = f"{hook}\n\n" + "\n".join("▪️ " + s for s in sents[:n]) + tail
-        if 350 <= len(text) <= 700: return text
+        if 350 <= len(text) <= 700:
+            return text
     text = f"{hook}\n\n▪️ {body[:500]}{tail}"
-    if len(text) < 350: text += "\n\nПрофессиональное решение для бизнеса."
+    if len(text) < 350:
+        text += "\n\nПрофессиональное решение для бизнеса."
     return text[:700] if len(text) > 700 else text
 
 prompt = (f"Проанализируй материал и напиши пост для ВКонтакте на русском: {title}. {body} "
@@ -125,27 +136,34 @@ if GROQ_KEY:
         t = llm_chat("https://api.groq.com/openai/v1/chat/completions",
                      {"Authorization": f"Bearer {GROQ_KEY}", "Content-Type": "application/json"},
                      "llama-3.3-70b-versatile", prompt)
-        if good_text(t): text, src = t, "Groq LLM"
-    except Exception: pass
+        if good_text(t):
+            text, src = t, "Groq LLM"
+    except Exception:
+        pass
 if not text and OR_KEY:
     try:
         t = llm_chat("https://openrouter.ai/api/v1/chat/completions",
                      {"Authorization": f"Bearer {OR_KEY}", "Content-Type": "application/json"},
                      "meta-llama/llama-3.1-8b-instruct:free", prompt)
-        if good_text(t): text, src = t, "OpenRouter LLM"
-    except Exception: pass
+        if good_text(t):
+            text, src = t, "OpenRouter LLM"
+    except Exception:
+        pass
 if not text:
     try:
         j = requests.post("https://text.pollinations.ai/openai", timeout=120,
                           json={"model": "openai", "messages": [{"role": "user", "content": prompt}]}).json()
         t = (j.get("choices", [{}])[0].get("message", {}).get("content") or "").strip()
-        if good_text(t): text, src = t, "LLM Pollinations"
-    except Exception: pass
+        if good_text(t):
+            text, src = t, "LLM Pollinations"
+    except Exception:
+        pass
 if not text:
     text, src = template_text(), "шаблон (LLM недоступен)"
-if page not in text: text += f"\n\n🔗 Подробнее: {page}"
+if page not in text:
+    text += f"\n\n🔗 Подробнее: {page}"
 text = trim700(text)
-log("Этап 4 (текст поста)", "✅" if "LLM" in src or "Groq" in src else "⚠️", f"источник: {src}, {len(text)} симв.")
+log("Этап 4 (текст поста)", "✅" if ("LLM" in src or "Groq" in src) else "⚠️", f"источник: {src}, {len(text)} симв.")
 
 # ---------- Этап 5: генерация картинки ----------
 img_bytes = b""
@@ -165,42 +183,46 @@ except Exception as e:
 def vk(method, **kw):
     kw.update(access_token=VK_TOKEN, v="5.131")
     j = requests.post(f"https://api.vk.com/method/{method}", data=kw, timeout=60).json()
-    if "error" in j: raise RuntimeError(f"[{j['error']['error_code']}] {j['error'].get('error_msg')}")
+    if "error" in j:
+        raise RuntimeError(f"[{j['error']['error_code']}] {j['error'].get('error_msg')}")
     return j["response"]
 
 def upload_via_album(gid, img_bytes):
-    """Обходной путь: загрузка фото в альбом сообщества и прикрепление к посту."""
     aid = None
     try:
         for a in vk("photos.getAlbums", group_id=gid)["items"]:
-            if a["title"] == "agent-images": aid = a["id"]; break
-    except Exception: pass
+            if a["title"] == "agent-images":
+                aid = a["id"]
+                break
+    except Exception:
+        pass
     if aid is None:
         aid = vk("photos.createAlbum", group_id=gid, title="agent-images",
                  description="Изображения для постов")["id"]
     up = vk("photos.getUploadServer", group_id=gid, album_id=aid)["upload_url"]
     j = requests.post(up, files={"photo": ("img.jpg", img_bytes, "image/jpeg")}, timeout=120).json()
-    p = vk("photos.save", group_id=gid, album_id=aid,
-           **{k: j[k] for k in ("photo", "photos_list", "server", "hash") if k in j})[0]
+    params = {k: j[k] for k in ("photo", "photos_list", "server", "hash") if k in j}
+    p = vk("photos.save", group_id=gid, album_id=aid, **params)[0]
     return f"photo{p['owner_id']}_{p['id']}"
 
 try:
-    if not VK_TOKEN: raise RuntimeError("не задан VK_TOKEN в Secrets")
+    if not VK_TOKEN:
+        raise RuntimeError("не задан VK_TOKEN в Secrets")
     gid = VK_GROUP
     if not gid.isdigit():
         gid = str(vk("groups.getById", group_id=gid)[0]["id"])
     att, how = "", ""
     if img_bytes:
-        try: # 1) напрямую на стену
+        try:
             up = vk("photos.getWallUploadServer", group_id=gid)["upload_url"]
             j = requests.post(up, files={"photo": ("img.jpg", img_bytes, "image/jpeg")}, timeout=120).json()
             p = vk("photos.saveWallPhoto", group_id=gid, photo=j["photo"], server=j["server"], hash=j["hash"])[0]
             att, how = f"photo{p['owner_id']}_{p['id']}", "фото"
         except Exception:
-            try: # 2) через альбом сообщества
+            try:
                 att, how = upload_via_album(gid, img_bytes), "фото из альбома сообщества"
             except Exception:
-                for m in ["docs.getWallUploadServer", "docs.getUploadServer"]: # 3) документ
+                for m in ["docs.getWallUploadServer", "docs.getUploadServer"]:
                     try:
                         up = vk(m, group_id=gid)["upload_url"]
                         j = requests.post(up, files={"file": ("img.jpg", img_bytes, "image/jpeg")}, timeout=120).json()
@@ -223,5 +245,4 @@ except Exception as e:
     log("Этап 6 (публикация ВК)", "❌", str(e))
 
 finish()
-
 
