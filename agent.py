@@ -1,4 +1,3 @@
-
 # -*- coding: utf-8 -*-
 import os, re, json, html, random, sys
 import urllib.parse
@@ -66,7 +65,7 @@ try:
     urls = []
     for sm in sitemaps:
         x = requests.get(sm, timeout=60, headers=UA).text
-        urls += [u for u in re.findall(r"<loc>\s*(.*?)\s*</loc>", x)
+        urls += [u for u in re.findall(r"<loc>\s*(.*?)\s</loc>", x)
                  if any(p in u for p in ["/catalog/", "/help/news/", "/help/articles/"])]
     urls = sorted(set(urls))
     log("Этап 1 (sitemap)", "✅", f"страниц найдено: {len(urls)}")
@@ -86,7 +85,6 @@ for attempt in range(5):
     m = re.search(r"<h1[^>]*>(.*?)</h1>", r, re.S | re.I)
     title = clean(m.group(1)) if m else ""
     tail = r[m.end():] if m else r
-    # вырезаем служебное: скрипты, стили, комментарии, JSON-разметку
     tail = re.sub(r"<script.*?</script>", " ", tail, flags=re.S | re.I)
     tail = re.sub(r"<style.*?</style>", " ", tail, flags=re.S | re.I)
     tail = re.sub(r"<!--.*?-->", " ", tail, flags=re.S)
@@ -170,6 +168,22 @@ def vk(method, **kw):
     if "error" in j: raise RuntimeError(f"[{j['error']['error_code']}] {j['error'].get('error_msg')}")
     return j["response"]
 
+def upload_via_album(gid, img_bytes):
+    """Обходной путь: загрузка фото в альбом сообщества и прикрепление к посту."""
+    aid = None
+    try:
+        for a in vk("photos.getAlbums", group_id=gid)["items"]:
+            if a["title"] == "agent-images": aid = a["id"]; break
+    except Exception: pass
+    if aid is None:
+        aid = vk("photos.createAlbum", group_id=gid, title="agent-images",
+                 description="Изображения для постов")["id"]
+    up = vk("photos.getUploadServer", group_id=gid, album_id=aid)["upload_url"]
+    j = requests.post(up, files={"photo": ("img.jpg", img_bytes, "image/jpeg")}, timeout=120).json()
+    p = vk("photos.save", group_id=gid, album_id=aid,
+           **{k: j[k] for k in ("photo", "photos_list", "server", "hash") if k in j})[0]
+    return f"photo{p['owner_id']}_{p['id']}"
+
 try:
     if not VK_TOKEN: raise RuntimeError("не задан VK_TOKEN в Secrets")
     gid = VK_GROUP
@@ -177,25 +191,28 @@ try:
         gid = str(vk("groups.getById", group_id=gid)[0]["id"])
     att, how = "", ""
     if img_bytes:
-        try:
+        try: # 1) напрямую на стену
             up = vk("photos.getWallUploadServer", group_id=gid)["upload_url"]
             j = requests.post(up, files={"photo": ("img.jpg", img_bytes, "image/jpeg")}, timeout=120).json()
             p = vk("photos.saveWallPhoto", group_id=gid, photo=j["photo"], server=j["server"], hash=j["hash"])[0]
             att, how = f"photo{p['owner_id']}_{p['id']}", "фото"
         except Exception:
-            for m in ["docs.getWallUploadServer", "docs.getUploadServer"]:
-                try:
-                    up = vk(m, group_id=gid)["upload_url"]
-                    j = requests.post(up, files={"file": ("img.jpg", img_bytes, "image/jpeg")}, timeout=120).json()
-                    d = vk("docs.save", file=j["file"])["doc"]
-                    att, how = f"doc{d['owner_id']}_{d['id']}", "документ-картинка"
-                    break
-                except Exception:
-                    continue
+            try: # 2) через альбом сообщества
+                att, how = upload_via_album(gid, img_bytes), "фото из альбома сообщества"
+            except Exception:
+                for m in ["docs.getWallUploadServer", "docs.getUploadServer"]: # 3) документ
+                    try:
+                        up = vk(m, group_id=gid)["upload_url"]
+                        j = requests.post(up, files={"file": ("img.jpg", img_bytes, "image/jpeg")}, timeout=120).json()
+                        d = vk("docs.save", file=j["file"])["doc"]
+                        att, how = f"doc{d['owner_id']}_{d['id']}", "документ-картинка"
+                        break
+                    except Exception:
+                        continue
         if att:
             log("Этап 6а (загрузка фото)", "✅", f"сгенерированная картинка прикреплена как {how}")
         else:
-            log("Этап 6а (загрузка фото)", "⚠️", "ВК отклонил загрузку — пост выйдет со ссылкой (превью с фото сайта)")
+            log("Этап 6а (загрузка фото)", "⚠️", "ВК отклонил загрузку — пост выйдет со ссылкой")
     post = vk("wall.post", owner_id="-" + gid,
               message=text, attachments=att, random_id=random.randint(1, 2**31))
     link = f"https://vk.com/wall-{gid}_{post['post_id']}"
@@ -206,3 +223,5 @@ except Exception as e:
     log("Этап 6 (публикация ВК)", "❌", str(e))
 
 finish()
+
+
