@@ -1,23 +1,24 @@
-
-
 name: pavrus-vk-agent
 
 on:
-  workflow_dispatch: # ручной запуск для проверки
+  workflow_dispatch:
   schedule:
-    - cron: "0 7 * * *" # ежедневно 07:00 UTC = 10:00 МСК
+    - cron: "0 7 * * *"
 
 permissions:
-  contents: write # чтобы коммитить history.json (защита от повторов)
+  contents: write
 
 jobs:
   publish:
     runs-on: ubuntu-latest
     env:
       VK_TOKEN: ${{ secrets.VK_TOKEN }}
+      VK_USER_TOKEN: ${{ secrets.VK_USER_TOKEN }}
       VK_GROUP_ID: ${{ secrets.VK_GROUP_ID }}
       TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
       TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      GROQ_KEY: ${{ secrets.GROQ_KEY }}
+      OPENROUTER_KEY: ${{ secrets.OPENROUTER_KEY }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
