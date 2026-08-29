@@ -62,7 +62,7 @@ def llm_chat(url, headers, model, prompt):
                             "max_tokens": 1024, "temperature": 0.7}).json()
     return (j["choices"][0]["message"]["content"] or "").strip()
 
-# ---------- Этап 1: список страниц (только /catalog/, /help/news/, /help/articles/) ----------
+# ---------- Этап 1: список страниц ----------
 try:
     xml = requests.get(SITEMAP, timeout=60, headers=UA).text
     locs = re.findall(r"<loc>\s*(.*?)\s*</loc>", xml)
@@ -134,14 +134,17 @@ prompt = (f"Ты SMM-маркетолог компании PAVRUS (оборуд�
           f"2-4 коротких абзаца с эмодзи, в конце ссылка {page} и 2-3 хэштега.")
 text, src = None, ""
 if OR_KEY:
-    try:
-        t = llm_chat("https://openrouter.ai/api/v1/chat/completions",
-                     {"Authorization": f"Bearer {OR_KEY}", "Content-Type": "application/json"},
-                     "qwen/qwen-2.5-72b-instruct:free", prompt)
-        if good_text(t):
-            text, src = t, "Qwen (OpenRouter)"
-    except Exception:
-        pass
+    for model in ["qwen/qwen-2.5-72b-instruct:free", "qwen/qwen-2-7b-instruct:free",
+                  "meta-llama/llama-3.1-8b-instruct:free"]:
+        try:
+            t = llm_chat("https://openrouter.ai/api/v1/chat/completions",
+                         {"Authorization": f"Bearer {OR_KEY}", "Content-Type": "application/json"},
+                         model, prompt)
+            if good_text(t):
+                text, src = t, "Qwen (OpenRouter)"
+                break
+        except Exception:
+            continue
 if not text and GROQ_KEY:
     try:
         t = llm_chat("https://api.groq.com/openai/v1/chat/completions",
@@ -197,13 +200,20 @@ try:
         gid = str(vk("groups.getById", group_id=gid)[0]["id"])
     att, how = "", ""
     if img_bytes:
-        # 1) пользовательский токен (когда поддержка ВК разрешит права)
+        # 1) пользовательский токен
         if VK_USER_TOKEN:
             try:
                 up = vk("photos.getWallUploadServer", group_id=gid, token=VK_USER_TOKEN)["upload_url"]
                 j = requests.post(up, files={"photo": ("img.jpg", img_bytes, "image/jpeg")}, timeout=120).json()
-                p = vk("photos.saveWallPhoto", group_id=gid, token=VK_USER_TOKEN,
-                       photo=j["photo"], server=j["server"], hash=j["hash"])[0]
+                if "photo" not in j:
+                    raise RuntimeError(f"ответ загрузки: {str(j)[:200]}")
+                try:
+                    p = vk("photos.saveWallPhoto", group_id=gid, token=VK_USER_TOKEN,
+                           photo=j["photo"], server=j["server"], hash=j["hash"])[0]
+                except Exception:
+                    # запасной вариант: сохранить без group_id (фото в альбом пользователя)
+                    p = vk("photos.saveWallPhoto", token=VK_USER_TOKEN,
+                           photo=j["photo"], server=j["server"], hash=j["hash"])[0]
                 att, how = f"photo{p['owner_id']}_{p['id']}", "фото (токен владельца)"
             except Exception as e:
                 log("Этап 6а", "⚠️", f"токен владельца не смог загрузить фото: {e}")
@@ -244,4 +254,3 @@ except Exception as e:
     log("Этап 6 (публикация ВК)", "❌", str(e))
 
 finish()
-
