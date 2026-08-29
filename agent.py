@@ -1,4 +1,3 @@
-
 # -*- coding: utf-8 -*-
 import os, re, json, html, random, sys
 import urllib.parse
@@ -10,11 +9,12 @@ HISTORY = "history.json"
 UA = {"User-Agent": "Mozilla/5.0 (pavrus-vk-agent)"}
 
 VK_TOKEN = os.getenv("VK_TOKEN", "")
+VK_USER_TOKEN = os.getenv("VK_USER_TOKEN", "")
 VK_GROUP = os.getenv("VK_GROUP_ID", "")
 TG_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TG_CHAT = os.getenv("TELEGRAM_CHAT_ID", "")
-GROQ_KEY = os.getenv("GROQ_KEY", "")
 OR_KEY = os.getenv("OPENROUTER_KEY", "")
+GROQ_KEY = os.getenv("GROQ_KEY", "")
 
 BLACKLIST = ["Корзина", "Кабинет", "Избранные", "Сравнение", "Каталог", "Войти", "Заказать звонок",
              "Санкт-Петербург", "Москва", "Новосибирск", "Краснодар", "Красноярск", "8 (800)", "info@",
@@ -62,7 +62,7 @@ def llm_chat(url, headers, model, prompt):
                             "max_tokens": 1024, "temperature": 0.7}).json()
     return (j["choices"][0]["message"]["content"] or "").strip()
 
-# ---------- Этап 1: список страниц ----------
+# ---------- Этап 1: список страниц (только /catalog/, /help/news/, /help/articles/) ----------
 try:
     xml = requests.get(SITEMAP, timeout=60, headers=UA).text
     locs = re.findall(r"<loc>\s*(.*?)\s*</loc>", xml)
@@ -112,7 +112,7 @@ for attempt in range(5):
 log("Этап 2 (случайная страница)", "✅", page)
 log("Этап 3 (контент)", "✅" if len(body) > 100 else "⚠️", f"«{title}», чистого текста: {len(body)} симв.")
 
-# ---------- Этап 4: ИИ-текст поста (350-700 символов) ----------
+# ---------- Этап 4: ИИ-текст поста (350-700 символов, СВОИМИ СЛОВАМИ) ----------
 def template_text():
     sents = [s for s in re.split(r"(?<=[.!?])\s+", body) if 40 < len(s) < 220][:4]
     hook = random.choice([f"🚀 PAVRUS: {title}", f"💡 Интересное решение — {title}", f"📢 Новое на pavrus.ru: {title}"])
@@ -127,26 +127,28 @@ def template_text():
         text += "\n\nПрофессиональное решение для бизнеса."
     return text[:700] if len(text) > 700 else text
 
-prompt = (f"Проанализируй материал и напиши пост для ВКонтакте на русском: {title}. {body} "
-          f"Требования: 350-700 символов, живой маркетинговый тон, 2-4 коротких абзаца или пункта с эмодзи, "
-          f"в конце ссылка {page} и 2-3 хэштега. Без служебного текста, JSON и меню.")
+prompt = (f"Ты SMM-маркетолог компании PAVRUS (оборудование для конференц-залов и переговорных). "
+          f"Материал со страницы сайта: {title}. {body} "
+          f"Напиши ПОЛНОСТЬЮ СВОИМИ СЛОВАМИ живой продающий пост для ВКонтакте: НЕ копируй предложения с сайта, "
+          f"передай суть и выгоды простыми словами, как будто рассказываешь клиенту. 350-700 символов, "
+          f"2-4 коротких абзаца с эмодзи, в конце ссылка {page} и 2-3 хэштега.")
 text, src = None, ""
-if GROQ_KEY:
+if OR_KEY:
+    try:
+        t = llm_chat("https://openrouter.ai/api/v1/chat/completions",
+                     {"Authorization": f"Bearer {OR_KEY}", "Content-Type": "application/json"},
+                     "qwen/qwen-2.5-72b-instruct:free", prompt)
+        if good_text(t):
+            text, src = t, "Qwen (OpenRouter)"
+    except Exception:
+        pass
+if not text and GROQ_KEY:
     try:
         t = llm_chat("https://api.groq.com/openai/v1/chat/completions",
                      {"Authorization": f"Bearer {GROQ_KEY}", "Content-Type": "application/json"},
                      "llama-3.3-70b-versatile", prompt)
         if good_text(t):
             text, src = t, "Groq LLM"
-    except Exception:
-        pass
-if not text and OR_KEY:
-    try:
-        t = llm_chat("https://openrouter.ai/api/v1/chat/completions",
-                     {"Authorization": f"Bearer {OR_KEY}", "Content-Type": "application/json"},
-                     "meta-llama/llama-3.1-8b-instruct:free", prompt)
-        if good_text(t):
-            text, src = t, "OpenRouter LLM"
     except Exception:
         pass
 if not text:
@@ -163,7 +165,7 @@ if not text:
 if page not in text:
     text += f"\n\n🔗 Подробнее: {page}"
 text = trim700(text)
-log("Этап 4 (текст поста)", "✅" if ("LLM" in src or "Groq" in src) else "⚠️", f"источник: {src}, {len(text)} симв.")
+log("Этап 4 (текст поста)", "✅" if src != "шаблон (LLM недоступен)" else "⚠️", f"источник: {src}, {len(text)} симв.")
 
 # ---------- Этап 5: генерация картинки ----------
 img_bytes = b""
@@ -180,30 +182,12 @@ except Exception as e:
     log("Этап 5 (картинка)", "⚠️", str(e))
 
 # ---------- Этап 6: публикация в ВК ----------
-def vk(method, **kw):
-    kw.update(access_token=VK_TOKEN, v="5.131")
+def vk(method, token=None, **kw):
+    kw.update(access_token=token or VK_TOKEN, v="5.131")
     j = requests.post(f"https://api.vk.com/method/{method}", data=kw, timeout=60).json()
     if "error" in j:
         raise RuntimeError(f"[{j['error']['error_code']}] {j['error'].get('error_msg')}")
     return j["response"]
-
-def upload_via_album(gid, img_bytes):
-    aid = None
-    try:
-        for a in vk("photos.getAlbums", group_id=gid)["items"]:
-            if a["title"] == "agent-images":
-                aid = a["id"]
-                break
-    except Exception:
-        pass
-    if aid is None:
-        aid = vk("photos.createAlbum", group_id=gid, title="agent-images",
-                 description="Изображения для постов")["id"]
-    up = vk("photos.getUploadServer", group_id=gid, album_id=aid)["upload_url"]
-    j = requests.post(up, files={"photo": ("img.jpg", img_bytes, "image/jpeg")}, timeout=120).json()
-    params = {k: j[k] for k in ("photo", "photos_list", "server", "hash") if k in j}
-    p = vk("photos.save", group_id=gid, album_id=aid, **params)[0]
-    return f"photo{p['owner_id']}_{p['id']}"
 
 try:
     if not VK_TOKEN:
@@ -213,24 +197,39 @@ try:
         gid = str(vk("groups.getById", group_id=gid)[0]["id"])
     att, how = "", ""
     if img_bytes:
-        try:
-            up = vk("photos.getWallUploadServer", group_id=gid)["upload_url"]
-            j = requests.post(up, files={"photo": ("img.jpg", img_bytes, "image/jpeg")}, timeout=120).json()
-            p = vk("photos.saveWallPhoto", group_id=gid, photo=j["photo"], server=j["server"], hash=j["hash"])[0]
-            att, how = f"photo{p['owner_id']}_{p['id']}", "фото"
-        except Exception:
+        # 1) пользовательский токен (когда поддержка ВК разрешит права)
+        if VK_USER_TOKEN:
             try:
-                att, how = upload_via_album(gid, img_bytes), "фото из альбома сообщества"
+                up = vk("photos.getWallUploadServer", group_id=gid, token=VK_USER_TOKEN)["upload_url"]
+                j = requests.post(up, files={"photo": ("img.jpg", img_bytes, "image/jpeg")}, timeout=120).json()
+                p = vk("photos.saveWallPhoto", group_id=gid, token=VK_USER_TOKEN,
+                       photo=j["photo"], server=j["server"], hash=j["hash"])[0]
+                att, how = f"photo{p['owner_id']}_{p['id']}", "фото (токен владельца)"
+            except Exception as e:
+                log("Этап 6а", "⚠️", f"токен владельца не смог загрузить фото: {e}")
+        # 2) запасные маршруты токеном сообщества
+        if not att:
+            try:
+                up = vk("photos.getWallUploadServer", group_id=gid)["upload_url"]
+                j = requests.post(up, files={"photo": ("img.jpg", img_bytes, "image/jpeg")}, timeout=120).json()
+                p = vk("photos.saveWallPhoto", group_id=gid, photo=j["photo"], server=j["server"], hash=j["hash"])[0]
+                att, how = f"photo{p['owner_id']}_{p['id']}", "фото"
             except Exception:
-                for m in ["docs.getWallUploadServer", "docs.getUploadServer"]:
-                    try:
-                        up = vk(m, group_id=gid)["upload_url"]
-                        j = requests.post(up, files={"file": ("img.jpg", img_bytes, "image/jpeg")}, timeout=120).json()
-                        d = vk("docs.save", file=j["file"])["doc"]
-                        att, how = f"doc{d['owner_id']}_{d['id']}", "документ-картинка"
-                        break
-                    except Exception:
-                        continue
+                try:
+                    aid = None
+                    for a in vk("photos.getAlbums", group_id=gid)["items"]:
+                        if a["title"] == "agent-images":
+                            aid = a["id"]; break
+                    if aid is None:
+                        aid = vk("photos.createAlbum", group_id=gid, title="agent-images",
+                                 description="Изображения для постов")["id"]
+                    up = vk("photos.getUploadServer", group_id=gid, album_id=aid)["upload_url"]
+                    j = requests.post(up, files={"photo": ("img.jpg", img_bytes, "image/jpeg")}, timeout=120).json()
+                    params = {k: j[k] for k in ("photo", "photos_list", "server", "hash") if k in j}
+                    p = vk("photos.save", group_id=gid, album_id=aid, **params)[0]
+                    att, how = f"photo{p['owner_id']}_{p['id']}", "фото из альбома"
+                except Exception:
+                    pass
         if att:
             log("Этап 6а (загрузка фото)", "✅", f"сгенерированная картинка прикреплена как {how}")
         else:
