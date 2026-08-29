@@ -43,11 +43,26 @@ def clean(s):
     return html.unescape(re.sub(r"\s+", " ", s)).strip()
 
 def good_text(t):
+    """Проверка текста: длина, отсутствие JSON и служебных 'мыслей' нейросети."""
     if not t or len(t) < 350:
         return False
     bad = ['"error"', "Payment Required", "pollen", "deprecation_notice", "<html", "<!DOCTYPE", "{", "@context"]
     if t.lstrip().startswith("{") or any(b in t for b in bad):
         return False
+    think = ["thinking process", "analyze the request", "constraints:", "**role", "source text:",
+             "here's a thinking", "<think>", "additional text:", "1. analyze"]
+    if any(tm in t.lower() for tm in think):
+        return False
+    return True
+
+def good_img(b):
+    """Проверка промпта для картинки: не скопировала ли нейросеть инструкцию."""
+    if not b or len(b) < 10 or len(b) > 200:
+        return False
+    lowb = b.lower()
+    for bad in ["description in english", "short (10-15", "of how this", "words) description"]:
+        if bad in lowb:
+            return False
     return True
 
 def trim700(t):
@@ -62,7 +77,7 @@ def llm_chat(url, headers, model, prompt):
                       json={"model": model, "messages": [{"role": "user", "content": prompt}],
                             "max_tokens": 1024, "temperature": 0.7}).json()
     if "error" in j:
-        raise RuntimeError(f"OpenRouter: {j['error'].get('message', '')[:120]}")
+        raise RuntimeError(f"Ошибка API: {j['error'].get('message', '')[:120]}")
     return (j["choices"][0]["message"]["content"] or "").strip()
 
 def split_img(t):
@@ -72,11 +87,13 @@ def split_img(t):
     return t, ""
 
 def or_free_models():
-    """Бесплатные модели OpenRouter, исключая agentic-only (inkling), с приоритетом Qwen/Llama."""
+    """Список бесплатных моделей OpenRouter. Исключаем 'рассуждалки' и агентные модели."""
     try:
         ms = requests.get("https://openrouter.ai/api/v1/models", timeout=30).json().get("data", [])
+        bad_models = ["inkling", "nemotron", "r1", "reasoning", "think"]
         frees = [m["id"] for m in ms
-                 if str(m["id"]).endswith(":free") and "inkling" not in str(m["id"]).lower()]
+                 if str(m["id"]).endswith(":free")
+                 and not any(bm in str(m["id"]).lower() for bm in bad_models)]
         def rank(mid):
             midl = mid.lower()
             for i, pref in enumerate(["qwen/", "meta-llama/", "mistralai/", "deepseek/", "inclusionai/"]):
@@ -165,7 +182,7 @@ prompt = (f"Ты SMM-маркетолог компании PAVRUS (оборуд�
           f"передай суть и выгоды простыми словами, как будто рассказываешь клиенту. 350-700 символов, "
           f"2-4 коротких абзаца с эмодзи, в конце ссылка {page} и 2-3 хэштега. "
           f"В самом конце ответа добавь отдельную строку: IMG: и короткое (10-15 слов) описание фотографии "
-          f"на АНГЛИЙСКОМ языке — как это оборудование выглядит в конференц-зале.")
+          f"на АНГЛИЙСКОМ языке — как это оборудование выглядит в конференц-зале. Пиши только сам пост и строку IMG.")
 text, src, img_hint = None, "", ""
 if OR_KEY:
     for model in or_free_models()[:5]:
@@ -173,29 +190,39 @@ if OR_KEY:
             a, b = split_img(llm_chat("https://openrouter.ai/api/v1/chat/completions",
                          {"Authorization": f"Bearer {OR_KEY}", "Content-Type": "application/json"},
                          model, prompt))
+            a = a.replace("**", "").strip() # Убираем маркдаун-жирность
             if good_text(a):
-                text, src, img_hint = a, f"LLM (OpenRouter: {model})", b
+                text, src = a, f"LLM (OpenRouter: {model})"
+                if good_img(b):
+                    img_hint = b
                 break
         except Exception as e:
             log("Этап 4 (debug)", "⚠️", f"{model}: {str(e)[:120]}")
+
 if not text and GROQ_KEY:
     try:
         a, b = split_img(llm_chat("https://api.groq.com/openai/v1/chat/completions",
                      {"Authorization": f"Bearer {GROQ_KEY}", "Content-Type": "application/json"},
                      "llama-3.3-70b-versatile", prompt))
+        a = a.replace("**", "").strip()
         if good_text(a):
-            text, src, img_hint = a, "Groq LLM", b
+            text, src = a, "Groq LLM"
+            if good_img(b): img_hint = b
     except Exception:
         pass
+
 if not text:
     try:
         j = requests.post("https://text.pollinations.ai/openai", timeout=120,
                           json={"model": "openai", "messages": [{"role": "user", "content": prompt}]}).json()
         a, b = split_img((j.get("choices", [{}])[0].get("message", {}).get("content") or "").strip())
+        a = a.replace("**", "").strip()
         if good_text(a):
-            text, src, img_hint = a, "LLM Pollinations", b
+            text, src = a, "LLM Pollinations"
+            if good_img(b): img_hint = b
     except Exception:
         pass
+
 if not text:
     text, src = template_text(), "шаблон (LLM недоступен)"
 if page not in text:
@@ -213,6 +240,7 @@ CATS = [("проектор", "video projector mounted in a conference room"),
         ("панел", "LCD panel on a conference room wall"),
         ("микшер", "audio mixer console"),
         ("радиогид", "tour guide system with headsets")]
+
 if img_hint:
     img_prompt = img_hint
 else:
@@ -222,6 +250,7 @@ else:
         if ru in low:
             img_prompt = e
             break
+
 img_bytes = b""
 try:
     p = urllib.parse.quote(f"Professional photo: {img_prompt}, photorealistic, product: {title}")
