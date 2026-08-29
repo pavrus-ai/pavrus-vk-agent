@@ -22,7 +22,9 @@ def finish():
               json={"chat_id":TG_CHAT,"text":"\n".join(rep)},timeout=30)
         except: pass
 def clean(s):
-    s=html.unescape(s); s=re.sub(r"<[^>]+>"," ",s); s=html.unescape(s)
+    for _ in range(3):
+        s=html.unescape(s)
+        s=re.sub(r"<[^>]+>"," ",s)
     return re.sub(r"\s+"," ",s).strip()
 def good_text(t):
     if not t or len(t)<350: return False
@@ -50,10 +52,10 @@ def trim(t):
     if len(t)<=700: return t
     c=t[:700]; i=max(c.rfind("."),c.rfind("!"),c.rfind("?"),c.rfind("\n"))
     return (c[:i+1] if i>350 else c).rstrip()
-def chat(url,h,m,p):
+def chat(url,h,m,p,mt=1024):
     j=requests.post(url,timeout=120,headers=h,
         json={"model":m,"messages":[{"role":"user","content":p}],
-              "max_tokens":1024,"temperature":0.7}).json()
+              "max_tokens":mt,"temperature":0.7}).json()
     if "error" in j: raise RuntimeError(f"API: {j['error'].get('message','')[:120]}")
     return (j["choices"][0]["message"]["content"] or "").strip()
 def sp(t):
@@ -157,7 +159,7 @@ if GROQ_KEY:
     if gm:
         try:
             a,b=sp(chat("https://api.groq.com/openai/v1/chat/completions",
-                {"Authorization":f"Bearer {GROQ_KEY}","Content-Type":"application/json"},gm,pr))
+               {"Authorization":f"Bearer {GROQ_KEY}","Content-Type":"application/json"},gm,pr,512))
             a=a.replace("**","").strip()
             if good_text(a): cands.append((a,f"Groq({gm})",b))
         except Exception as e: log("Этап 4(debug)","⚠️",f"Groq: {str(e)[:100]}")
