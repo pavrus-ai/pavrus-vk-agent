@@ -23,8 +23,7 @@ def finish():
         except: pass
 def clean(s):
     for _ in range(3):
-        s=html.unescape(s)
-        s=re.sub(r"<[^>]+>"," ",s)
+        s=html.unescape(s); s=re.sub(r"<[^>]+>"," ",s)
     return re.sub(r"\s+"," ",s).strip()
 def good_text(t):
     if not t or len(t)<350: return False
@@ -92,7 +91,7 @@ except Exception as e: log("Этап 1","❌",str(e)); finish(); sys.exit(1)
 # --- Этапы 2-3 ---
 try: hist=set(json.load(open(HISTORY,encoding="utf-8"))) if os.path.exists(HISTORY) else set()
 except: hist=set()
-title=body=page=desc=""
+title=body=page=desc=site_img=""
 for _ in range(5):
     page=random.choice([u for u in urls if u not in hist] or urls)
     r=requests.get(page,timeout=60,headers=UA).text
@@ -109,6 +108,11 @@ for _ in range(5):
     for mk in ["Назад к списку","Нужна консультация","Подробная информация"]:
         i=tail.find(mk)
         if i!=-1: tail=tail[:i]
+    im=re.search(r'<meta[^>]+property=["\']og:image["\'][^>]+content=["\'](.*?)["\']',r,re.S|re.I)
+    if not im: im=re.search(r'<img[^>]+src=["\'](.*?)["\']',tail,re.S|re.I)
+    site_img=(im.group(1) if im else "").strip()
+    if site_img.startswith("//"): site_img="https:"+site_img
+    elif site_img.startswith("/"): site_img=SITE+site_img
     paras=re.findall(r"<p[^>]*>(.*?)</p>",tail,re.S|re.I)
     raw=" ".join(clean(p) for p in paras)
     if len(raw)<100: raw=clean(tail)
@@ -118,7 +122,7 @@ for _ in range(5):
     if title and "не найдена" not in title.lower() and (len(body)>100 or len(desc)>60): break
 log("Этап 2","✅",page)
 log("Этап 3","✅" if (len(body)>100 or len(desc)>60) else "⚠️",
-    f"«{title}», desc: {len(desc)}, text: {len(body)}")
+    f"«{title}», desc: {len(desc)}, text: {len(body)}, фото: {'да' if site_img else 'нет'}")
 # --- Этап 4: битва двух ИИ ---
 def tpl():
     base=desc or body
@@ -159,7 +163,7 @@ if GROQ_KEY:
     if gm:
         try:
             a,b=sp(chat("https://api.groq.com/openai/v1/chat/completions",
-               {"Authorization":f"Bearer {GROQ_KEY}","Content-Type":"application/json"},gm,pr,512))
+                {"Authorization":f"Bearer {GROQ_KEY}","Content-Type":"application/json"},gm,pr,512))
             a=a.replace("**","").strip()
             if good_text(a): cands.append((a,f"Groq({gm})",b))
         except Exception as e: log("Этап 4(debug)","⚠️",f"Groq: {str(e)[:100]}")
@@ -176,7 +180,7 @@ if page not in text: text+=f"\n\n🔗 {page}"
 text=re.sub(r"https://pavrus\.(?![a-zA-Z])","https://pavrus.ru",text)
 text=trim(text)
 log("Этап 4","✅" if src!="шаблон" else "⚠️",f"{src}, {len(text)} симв.")
-# --- Этап 5: картинка ---
+# --- Этап 5: картинки ---
 CAT=[("проектор","video projector mounted in a conference room"),
      ("громкоговоритель","ceiling loudspeaker in a conference room"),
      ("микрофон","conference microphone on a table"),
@@ -198,10 +202,17 @@ try:
     u=f"https://image.pollinations.ai/prompt/{p}?width=1200&height=800&nologo=true&seed={random.randint(1,999999)}"
     resp=requests.get(u,timeout=180)
     if resp.headers.get("content-type","").startswith("image"):
-        img_bytes=resp.content
-        log("Этап 5","✅",f"{len(img_bytes)} байт, {ip[:60]}")
+        img_bytes=resp.content; log("Этап 5","✅",f"{len(img_bytes)} байт, {ip[:50]}")
     else: log("Этап 5","⚠️","не изображение")
-except Exception as e: log("Этап 5","⚠️",str(e))
+except Exception as e: log("Этап 5","⚠️",str(e)[:80])
+site_bytes=b""
+if site_img:
+    try:
+        rs=requests.get(site_img,timeout=60,headers=UA)
+        if rs.headers.get("content-type","").startswith("image") and 1000<len(rs.content)<20*1024*1024:
+            site_bytes=rs.content; log("Этап 5b","✅",f"фото с сайта: {len(site_bytes)} байт")
+        else: log("Этап 5b","⚠️","не изображение")
+    except Exception as e: log("Этап 5b","⚠️",str(e)[:80])
 # --- Этап 6: ВК ---
 def vk(method,token=None,**kw):
     kw.update(access_token=token or VK_TOKEN,v="5.131")
@@ -212,45 +223,35 @@ try:
     if not VK_TOKEN: raise RuntimeError("нет VK_TOKEN")
     gid=VK_GROUP
     if not gid.isdigit(): gid=str(vk("groups.getById",group_id=gid)[0]["id"])
-    att=how=""
-    if img_bytes:
-        if VK_USER_TOKEN:
+    def upl(data):
+        up=vk("photos.getWallUploadServer",group_id=gid,token=VK_USER_TOKEN)["upload_url"]
+        j=requests.post(up,files={"photo":("i.jpg",data,"image/jpeg")},timeout=120).json()
+        p=None; errs=[]
+        for ex in [{"group_id":gid},{}]:
             try:
-                up=vk("photos.getWallUploadServer",group_id=gid,token=VK_USER_TOKEN)["upload_url"]
-                j=requests.post(up,files={"photo":("i.jpg",img_bytes,"image/jpeg")},timeout=120).json()
-                errs=[]; p=None
-                for ex in [{"group_id":gid},{}]:
-                    try:
-                        p=vk("photos.saveWallPhoto",token=VK_USER_TOKEN,
-                            photo=j.get("photo",""),server=j.get("server",""),hash=j.get("hash",""),**ex)[0]
-                        break
-                    except Exception as e2: errs.append(str(e2))
-                if p is None: raise RuntimeError(" | ".join(errs))
-                att,how=f"photo{p['owner_id']}_{p['id']}","токен владельца"
-            except Exception as e: log("Этап 6а","⚠️",f"токен владельца: {e}")
-        if not att:
-            try:
-                up=vk("photos.getWallUploadServer",group_id=gid)["upload_url"]
-                j=requests.post(up,files={"photo":("i.jpg",img_bytes,"image/jpeg")},timeout=120).json()
-                p=vk("photos.saveWallPhoto",group_id=gid,photo=j["photo"],server=j["server"],hash=j["hash"])[0]
-                att,how=f"photo{p['owner_id']}_{p['id']}","фото"
-            except:
-                try:
-                    aid=None
-                    for a in vk("photos.getAlbums",group_id=gid)["items"]:
-                        if a["title"]=="agent-images": aid=a["id"]; break
-                    if aid is None:
-                        aid=vk("photos.createAlbum",group_id=gid,title="agent-images",
-                               description="Изображения для постов")["id"]
-                    up=vk("photos.getUploadServer",group_id=gid,album_id=aid)["upload_url"]
-                    j=requests.post(up,files={"photo":("i.jpg",img_bytes,"image/jpeg")},timeout=120).json()
-                    pk={k:j[k] for k in ("photo","photos_list","server","hash") if k in j}
-                    p=vk("photos.save",group_id=gid,album_id=aid,**pk)[0]
-                    att,how=f"photo{p['owner_id']}_{p['id']}","альбом"
-                except: pass
-        if att: log("Этап 6а","✅",how)
-        else: log("Этап 6а","⚠️","отклонено — пост со ссылкой")
-    post=vk("wall.post",owner_id="-"+gid,message=text,attachments=att,random_id=random.randint(1,2**31))
+                p=vk("photos.saveWallPhoto",token=VK_USER_TOKEN,photo=j.get("photo",""),
+                     server=j.get("server",""),hash=j.get("hash",""),**ex)[0]; break
+            except Exception as e2: errs.append(str(e2))
+        if p is None: raise RuntimeError(" | ".join(errs))
+        return f"photo{p['owner_id']}_{p['id']}"
+    atts=[]
+    if site_bytes and VK_USER_TOKEN:
+        try: atts.append(upl(site_bytes)); log("Этап 6а","✅","оригинальное фото с сайта")
+        except Exception as e: log("Этап 6а","⚠️",f"фото сайта: {str(e)[:80]}")
+    if img_bytes and VK_USER_TOKEN:
+        try: atts.append(upl(img_bytes)); log("Этап 6а","✅","сгенерированная картинка")
+        except Exception as e: log("Этап 6а","⚠️",f"генерация: {str(e)[:80]}")
+    if not atts and img_bytes:
+        try:
+            up=vk("photos.getWallUploadServer",group_id=gid)["upload_url"]
+            j=requests.post(up,files={"photo":("i.jpg",img_bytes,"image/jpeg")},timeout=120).json()
+            p=vk("photos.saveWallPhoto",group_id=gid,photo=j["photo"],server=j["server"],hash=j["hash"])[0]
+            atts.append(f"photo{p['owner_id']}_{p['id']}")
+        except: pass
+    if atts: log("Этап 6а","✅",f"прикреплено фото: {len(atts)}")
+    else: log("Этап 6а","⚠️","пост со ссылкой")
+    post=vk("wall.post",owner_id="-"+gid,message=text,attachments=",".join(atts),
+            random_id=random.randint(1,2**31))
     link=f"https://vk.com/wall-{gid}_{post['post_id']}"
     log("Этап 6","✅",link)
     hist.add(page); json.dump(sorted(hist),open(HISTORY,"w",encoding="utf-8"),ensure_ascii=False,indent=1)
