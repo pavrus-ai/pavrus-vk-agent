@@ -1,4 +1,3 @@
-
 # -*- coding: utf-8 -*-
 import os, re, json, html, random, sys
 import urllib.parse
@@ -63,8 +62,14 @@ def llm_chat(url, headers, model, prompt):
                             "max_tokens": 1024, "temperature": 0.7}).json()
     return (j["choices"][0]["message"]["content"] or "").strip()
 
+def split_img(t):
+    """Отделяет строку IMG: ... (описание картинки на английском) от текста поста."""
+    if "IMG:" in t:
+        a, b = t.split("IMG:", 1)
+        return a.strip(), b.strip()[:200]
+    return t, ""
+
 def or_pick_free_model():
-    """Берём первую доступную бесплатную модель OpenRouter (лучше Qwen)."""
     try:
         ms = requests.get("https://openrouter.ai/api/v1/models", timeout=30).json().get("data", [])
         frees = [m["id"] for m in ms if str(m["id"]).endswith(":free")]
@@ -93,18 +98,22 @@ try:
 except Exception as e:
     log("Этап 1 (sitemap)", "❌", str(e)); finish(); sys.exit(1)
 
-# ---------- Этапы 2-3: случайная страница + ЧИСТЫЙ контент ----------
+# ---------- Этапы 2-3: случайная страница + контент + description ----------
 try:
     hist = set(json.load(open(HISTORY, encoding="utf-8"))) if os.path.exists(HISTORY) else set()
 except Exception:
     hist = set()
 
-title = body = page = ""
+title = body = page = desc = ""
 for attempt in range(5):
     page = random.choice([u for u in urls if u not in hist] or urls)
     r = requests.get(page, timeout=60, headers=UA).text
     m = re.search(r"<h1[^>]*>(.*?)</h1>", r, re.S | re.I)
     title = clean(m.group(1)) if m else ""
+    dm = re.search(r'<meta[^>]+name=["\']description["\'][^>]+content=["\'](.*?)["\']', r, re.S | re.I) \
+         or re.search(r'<meta[^>]+content=["\'](.*?)["\'][^>]+name=["\']description["\']', r, re.S | re.I) \
+         or re.search(r'<meta[^>]+property=["\']og:description["\'][^>]+content=["\'](.*?)["\']', r, re.S | re.I)
+    desc = clean(dm.group(1)) if dm else ""
     tail = r[m.end():] if m else r
     tail = re.sub(r"<script.*?</script>", " ", tail, flags=re.S | re.I)
     tail = re.sub(r"<style.*?</style>", " ", tail, flags=re.S | re.I)
@@ -121,14 +130,16 @@ for attempt in range(5):
             if len(s.strip()) >= 40 and "{" not in s and '"' not in s
             and not any(b in s for b in BLACKLIST)]
     body = " ".join(keep)[:1500]
-    if title and "не найдена" not in title.lower() and len(body) > 100:
+    if title and "не найдена" not in title.lower() and (len(body) > 100 or len(desc) > 60):
         break
 log("Этап 2 (случайная страница)", "✅", page)
-log("Этап 3 (контент)", "✅" if len(body) > 100 else "⚠️", f"«{title}», чистого текста: {len(body)} симв.")
+log("Этап 3 (контент)", "✅" if (len(body) > 100 or len(desc) > 60) else "⚠️",
+    f"«{title}», описание: {len(desc)} симв., чистого текста: {len(body)} симв.")
 
-# ---------- Этап 4: ИИ-текст поста (350-700 символов, СВОИМИ СЛОВАМИ) ----------
+# ---------- Этап 4: ИИ-текст поста + описание картинки ----------
 def template_text():
-    sents = [s for s in re.split(r"(?<=[.!?])\s+", body) if 40 < len(s) < 220][:4]
+    base = desc or body
+    sents = [s for s in re.split(r"(?<=[.!?])\s+", base) if 40 < len(s) < 220][:4]
     hook = random.choice([f"🚀 PAVRUS: {title}", f"💡 Интересное решение — {title}", f"📢 Новое на pavrus.ru: {title}"])
     tail = (f"\n\n🔗 Подробнее: {page}\n🏢 Оборудование для конференц-залов и переговорных\n"
             f"📩 Консультация: pavrus.ru\n#PAVRUS #АВоборудование")
@@ -136,44 +147,46 @@ def template_text():
         text = f"{hook}\n\n" + "\n".join("▪️ " + s for s in sents[:n]) + tail
         if 350 <= len(text) <= 700:
             return text
-    text = f"{hook}\n\n▪️ {body[:500]}{tail}"
+    text = f"{hook}\n\n▪️ {base[:500]}{tail}"
     if len(text) < 350:
         text += "\n\nПрофессиональное решение для бизнеса."
     return text[:700] if len(text) > 700 else text
 
 prompt = (f"Ты SMM-маркетолог компании PAVRUS (оборудование для конференц-залов и переговорных). "
-          f"Материал со страницы сайта: {title}. {body} "
+          f"Товар/материал: {title}. Описание с сайта: {desc} Дополнительный текст: {body} "
           f"Напиши ПОЛНОСТЬЮ СВОИМИ СЛОВАМИ живой продающий пост для ВКонтакте: НЕ копируй предложения с сайта, "
           f"передай суть и выгоды простыми словами, как будто рассказываешь клиенту. 350-700 символов, "
-          f"2-4 коротких абзаца с эмодзи, в конце ссылка {page} и 2-3 хэштега.")
-text, src = None, ""
+          f"2-4 коротких абзаца с эмодзи, в конце ссылка {page} и 2-3 хэштега. "
+          f"В самом конце ответа добавь отдельную строку: IMG: и короткое (10-15 слов) описание фотографии "
+          f"на АНГЛИЙСКОМ языке — как это оборудование выглядит в конференц-зале.")
+text, src, img_hint = None, "", ""
 if OR_KEY:
     model = or_pick_free_model()
     if model:
         try:
-            t = llm_chat("https://openrouter.ai/api/v1/chat/completions",
+            a, b = split_img(llm_chat("https://openrouter.ai/api/v1/chat/completions",
                          {"Authorization": f"Bearer {OR_KEY}", "Content-Type": "application/json"},
-                         model, prompt)
-            if good_text(t):
-                text, src = t, f"Qwen/LLM (OpenRouter: {model})"
+                         model, prompt))
+            if good_text(a):
+                text, src, img_hint = a, f"Qwen/LLM (OpenRouter: {model})", b
         except Exception:
             pass
 if not text and GROQ_KEY:
     try:
-        t = llm_chat("https://api.groq.com/openai/v1/chat/completions",
+        a, b = split_img(llm_chat("https://api.groq.com/openai/v1/chat/completions",
                      {"Authorization": f"Bearer {GROQ_KEY}", "Content-Type": "application/json"},
-                     "llama-3.3-70b-versatile", prompt)
-        if good_text(t):
-            text, src = t, "Groq LLM"
+                     "llama-3.3-70b-versatile", prompt))
+        if good_text(a):
+            text, src, img_hint = a, "Groq LLM", b
     except Exception:
         pass
 if not text:
     try:
         j = requests.post("https://text.pollinations.ai/openai", timeout=120,
                           json={"model": "openai", "messages": [{"role": "user", "content": prompt}]}).json()
-        t = (j.get("choices", [{}])[0].get("message", {}).get("content") or "").strip()
-        if good_text(t):
-            text, src = t, "LLM Pollinations"
+        a, b = split_img((j.get("choices", [{}])[0].get("message", {}).get("content") or "").strip())
+        if good_text(a):
+            text, src, img_hint = a, "LLM Pollinations", b
     except Exception:
         pass
 if not text:
@@ -183,15 +196,33 @@ if page not in text:
 text = trim700(text)
 log("Этап 4 (текст поста)", "✅" if src != "шаблон (LLM недоступен)" else "⚠️", f"источник: {src}, {len(text)} симв.")
 
-# ---------- Этап 5: генерация картинки ----------
+# ---------- Этап 5: картинка (описание от ИИ или категория + конференц-зал) ----------
+CATS = [("проектор", "video projector mounted in a conference room"),
+        ("громкоговоритель", "ceiling loudspeaker in a conference room"),
+        ("микрофон", "conference microphone on a table"),
+        ("усилитель", "audio amplifier rack"),
+        ("камер", "PTZ video camera in a conference room"),
+        ("дисплей", "large display on a conference room wall"),
+        ("панел", "LCD panel on a conference room wall"),
+        ("микшер", "audio mixer console"),
+        ("радиогид", "tour guide system with headsets")]
+if img_hint:
+    img_prompt = img_hint
+else:
+    low = (title + " " + desc + " " + body[:400]).lower()
+    img_prompt = "AV equipment in a modern conference room"
+    for ru, e in CATS:
+        if ru in low:
+            img_prompt = e
+            break
 img_bytes = b""
 try:
-    p = urllib.parse.quote(f"Professional photo: {title}, modern conference room, AV equipment, photorealistic")
+    p = urllib.parse.quote(f"Professional photo: {img_prompt}, photorealistic, product: {title}")
     img_url = f"https://image.pollinations.ai/prompt/{p}?width=1200&height=800&nologo=true&seed={random.randint(1, 999999)}"
     resp = requests.get(img_url, timeout=180)
     if resp.headers.get("content-type", "").startswith("image"):
         img_bytes = resp.content
-        log("Этап 5 (картинка)", "✅", f"{len(img_bytes)} байт")
+        log("Этап 5 (картинка)", "✅", f"{len(img_bytes)} байт, промпт: {img_prompt[:60]}")
     else:
         log("Этап 5 (картинка)", "⚠️", "сервер вернул не изображение")
 except Exception as e:
@@ -213,12 +244,10 @@ try:
         gid = str(vk("groups.getById", group_id=gid)[0]["id"])
     att, how = "", ""
     if img_bytes:
-        # 1) пользовательский токен + диагностика
         if VK_USER_TOKEN:
             try:
                 up = vk("photos.getWallUploadServer", group_id=gid, token=VK_USER_TOKEN)["upload_url"]
                 j = requests.post(up, files={"photo": ("img.jpg", img_bytes, "image/jpeg")}, timeout=120).json()
-                log("Этап 6а (debug)", "ℹ️", f"ключи ответа загрузки: {sorted(j.keys())}")
                 errs = []
                 p = None
                 for extra in [{"group_id": gid}, {}]:
@@ -234,7 +263,6 @@ try:
                 att, how = f"photo{p['owner_id']}_{p['id']}", "фото (токен владельца)"
             except Exception as e:
                 log("Этап 6а", "⚠️", f"токен владельца: {e}")
-        # 2) запасные маршруты токеном сообщества
         if not att:
             try:
                 up = vk("photos.getWallUploadServer", group_id=gid)["upload_url"]
@@ -271,4 +299,3 @@ except Exception as e:
     log("Этап 6 (публикация ВК)", "❌", str(e))
 
 finish()
-
