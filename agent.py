@@ -152,9 +152,9 @@ if GROQ_KEY:
         ms=requests.get("https://api.groq.com/openai/v1/models",timeout=30,
             headers={"Authorization":f"Bearer {GROQ_KEY}"}).json().get("data",[])
         ids=[m["id"] for m in ms]
-        for p in ["llama-3.3-70b","llama-3.1-8b","llama",""]:
-            gm=next((i for i in ids if i.startswith(p)),None)
-            if gm: break
+        ok=[i for i in ids if any(k in i.lower() for k in ["llama","gpt-oss","mixtral","qwen"])
+            and not any(b in i.lower() for b in ["whisper","guard","distil"])]
+        gm=ok[0] if ok else None
     except: gm=None
     if gm:
         try:
@@ -173,6 +173,7 @@ if cands:
             " | ".join(f"{c[1]}:{score(c[0])}" for c in cands)+f" → {src}")
 if not text: text,src=tpl(),"шаблон"
 if page not in text: text+=f"\n\n🔗 {page}"
+text=re.sub(r"https://pavrus\.(?![a-zA-Z])","https://pavrus.ru",text)
 text=trim(text)
 log("Этап 4","✅" if src!="шаблон" else "⚠️",f"{src}, {len(text)} симв.")
 # --- Этап 5: картинка ---
