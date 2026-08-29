@@ -1,3 +1,4 @@
+
 # -*- coding: utf-8 -*-
 import os, re, json, html, random, sys
 import urllib.parse
@@ -60,26 +61,30 @@ def llm_chat(url, headers, model, prompt):
     j = requests.post(url, timeout=120, headers=headers,
                       json={"model": model, "messages": [{"role": "user", "content": prompt}],
                             "max_tokens": 1024, "temperature": 0.7}).json()
+    if "error" in j:
+        raise RuntimeError(f"OpenRouter: {j['error'].get('message', '')[:120]}")
     return (j["choices"][0]["message"]["content"] or "").strip()
 
 def split_img(t):
-    """Отделяет строку IMG: ... (описание картинки на английском) от текста поста."""
     if "IMG:" in t:
         a, b = t.split("IMG:", 1)
         return a.strip(), b.strip()[:200]
     return t, ""
 
-def or_pick_free_model():
+def or_free_models():
     try:
         ms = requests.get("https://openrouter.ai/api/v1/models", timeout=30).json().get("data", [])
         frees = [m["id"] for m in ms if str(m["id"]).endswith(":free")]
-        for pref in ["qwen", "llama", "mistral", ""]:
-            for mid in frees:
-                if pref in mid.lower():
-                    return mid
+        def rank(mid):
+            midl = mid.lower()
+            for i, pref in enumerate(["qwen", "llama", "mistral", "ling", "deepseek"]):
+                if pref in midl:
+                    return i
+            return 9
+        frees.sort(key=rank)
+        return frees
     except Exception:
-        pass
-    return None
+        return []
 
 # ---------- Этап 1: список страниц ----------
 try:
@@ -161,16 +166,16 @@ prompt = (f"Ты SMM-маркетолог компании PAVRUS (оборуд�
           f"на АНГЛИЙСКОМ языке — как это оборудование выглядит в конференц-зале.")
 text, src, img_hint = None, "", ""
 if OR_KEY:
-    model = or_pick_free_model()
-    if model:
+    for model in or_free_models()[:3]:
         try:
             a, b = split_img(llm_chat("https://openrouter.ai/api/v1/chat/completions",
                          {"Authorization": f"Bearer {OR_KEY}", "Content-Type": "application/json"},
                          model, prompt))
             if good_text(a):
-                text, src, img_hint = a, f"Qwen/LLM (OpenRouter: {model})", b
-        except Exception:
-            pass
+                text, src, img_hint = a, f"LLM (OpenRouter: {model})", b
+                break
+        except Exception as e:
+            log("Этап 4 (debug)", "⚠️", f"{model}: {str(e)[:120]}")
 if not text and GROQ_KEY:
     try:
         a, b = split_img(llm_chat("https://api.groq.com/openai/v1/chat/completions",
@@ -196,7 +201,7 @@ if page not in text:
 text = trim700(text)
 log("Этап 4 (текст поста)", "✅" if src != "шаблон (LLM недоступен)" else "⚠️", f"источник: {src}, {len(text)} симв.")
 
-# ---------- Этап 5: картинка (описание от ИИ или категория + конференц-зал) ----------
+# ---------- Этап 5: картинка ----------
 CATS = [("проектор", "video projector mounted in a conference room"),
         ("громкоговоритель", "ceiling loudspeaker in a conference room"),
         ("микрофон", "conference microphone on a table"),
