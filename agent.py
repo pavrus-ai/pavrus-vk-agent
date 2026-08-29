@@ -72,13 +72,15 @@ def split_img(t):
     return t, ""
 
 def or_free_models():
+    """Бесплатные модели OpenRouter, исключая agentic-only (inkling), с приоритетом Qwen/Llama."""
     try:
         ms = requests.get("https://openrouter.ai/api/v1/models", timeout=30).json().get("data", [])
-        frees = [m["id"] for m in ms if str(m["id"]).endswith(":free")]
+        frees = [m["id"] for m in ms
+                 if str(m["id"]).endswith(":free") and "inkling" not in str(m["id"]).lower()]
         def rank(mid):
             midl = mid.lower()
-            for i, pref in enumerate(["qwen", "llama", "mistral", "ling", "deepseek"]):
-                if pref in midl:
+            for i, pref in enumerate(["qwen/", "meta-llama/", "mistralai/", "deepseek/", "inclusionai/"]):
+                if midl.startswith(pref):
                     return i
             return 9
         frees.sort(key=rank)
@@ -166,7 +168,7 @@ prompt = (f"Ты SMM-маркетолог компании PAVRUS (оборуд�
           f"на АНГЛИЙСКОМ языке — как это оборудование выглядит в конференц-зале.")
 text, src, img_hint = None, "", ""
 if OR_KEY:
-    for model in or_free_models()[:3]:
+    for model in or_free_models()[:5]:
         try:
             a, b = split_img(llm_chat("https://openrouter.ai/api/v1/chat/completions",
                          {"Authorization": f"Bearer {OR_KEY}", "Content-Type": "application/json"},
