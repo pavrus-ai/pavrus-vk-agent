@@ -78,9 +78,9 @@ def score(t):
     if "**" in t: s-=2
     return s
 
-def trim(t):
-    if len(t)<=700: return t
-    c=t[:700]; i=max(c.rfind("."),c.rfind("!"),c.rfind("?"),c.rfind("\n"))
+def trim(t,limit=700):
+    if len(t)<=limit: return t
+    c=t[:limit]; i=max(c.rfind("."),c.rfind("!"),c.rfind("?"),c.rfind("\n"))
     return (c[:i+1] if i>350 else c).rstrip()
 
 def chat(url,h,m,p,mt=1024):
@@ -216,9 +216,16 @@ if cands:
         log("Этап 4 (сравнение)","ℹ️",
             " | ".join(f"{c[1]}:{score(c[0])}" for c in cands)+f" → {src}")
 if not text: text,src=tpl(),"шаблон"
-if page not in text: text+=f"\n\n🔗 {page}"
 text=re.sub(r"https://pavrus.(?![a-zA-Z])","https://pavrus.ru",text)
-text=trim(text)
+
+# Ссылка и хэштеги добавляются ПОСЛЕ обрезки — они будут в посте всегда
+tail=""
+if page not in text: tail+=f"\n\n🔗 {page}"
+if "#PAVRUS" not in text: tail+="\n#PAVRUS #AVоборудование"
+if tail:
+    text=trim(text,700-len(tail))+tail
+else:
+    text=trim(text)
 log("Этап 4","✅" if src!="шаблон" else "⚠️",f"{src}, {len(text)} симв.")
 
 # --- Этап 5: картинки ---
@@ -323,3 +330,4 @@ try:
 except Exception as e: log("Этап 6","❌",str(e))
 
 finish()
+
