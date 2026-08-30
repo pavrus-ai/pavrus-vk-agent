@@ -61,7 +61,7 @@ def good_img(b):
     return True
 
 def smart_canvas(data, target=1280):
-    """Кладёт картинку БЕЗ масштабирования на белую подложку,
+    """Кладёт картинку БЕЗ масштабирования на белую подложку (PNG),
     чтобы ВК растягивал только пустое поле, а фото осталось в своём разрешении."""
     im = Image.open(io.BytesIO(data))
     w, h = im.size
@@ -73,7 +73,7 @@ def smart_canvas(data, target=1280):
     else:
         canvas.paste(im.convert("RGB"), pos)
     buf = io.BytesIO()
-    canvas.save(buf, "JPEG", quality=92)
+    canvas.save(buf, "PNG")
     return buf.getvalue()
 
 def score(t):
@@ -242,7 +242,7 @@ if cands:
 if not text: text,src=tpl(),"шаблон"
 text=re.sub(r"https://pavrus.(?![a-zA-Z])","https://pavrus.ru",text)
 
-# Ссылка и хэштеги добавляются ПОСЛЕ обрезки — они будут в посте всегда
+# Ссылка и хэштеги добавляются ПОСЛЕ обрезки — они будут в посте ВСЕГДА
 add=""
 if page not in text: add+=f"\n\n🔗 {page}"
 if "#PAVRUS" not in text: add+="\n#PAVRUS #AVоборудование"
@@ -303,7 +303,7 @@ if site_bytes:
         site_bytes=b""
     elif max(w,h)<1000:
         site_bytes=smart_canvas(site_bytes)
-        log("Этап 5б","✅",f"фото с сайта {w}x{h} → на белой подложке 1280, без растягивания")
+        log("Этап 5б","✅",f"фото с сайта {w}x{h} → на белой подложке 1280 (PNG), без растягивания")
     else:
         log("Этап 5б","✅",f"фото с сайта: {len(site_bytes)} байт, {w}x{h}")
 else:
@@ -323,7 +323,10 @@ try:
 
     def upl(data):
         up=vk("photos.getWallUploadServer",group_id=gid,token=VK_USER_TOKEN)["upload_url"]
-        j=requests.post(up,files={"photo":("i.jpg",data,"image/jpeg")},timeout=120).json()
+        png=data[:8]==b"\x89PNG\r\n\x1a\n"
+        fn="i.png" if png else "i.jpg"
+        mt="image/png" if png else "image/jpeg"
+        j=requests.post(up,files={"photo":(fn,data,mt)},timeout=120).json()
         if not j.get("photo"):
             log("Этап 6а(debug)","⚠️",f"ответ сервера загрузки: {str(j)[:120]}")
             raise RuntimeError("сервер загрузки не вернул photo")
@@ -346,7 +349,9 @@ try:
     if not atts and img_bytes:
         try:
             up=vk("photos.getWallUploadServer",group_id=gid)["upload_url"]
-            j=requests.post(up,files={"photo":("i.jpg",img_bytes,"image/jpeg")},timeout=120).json()
+            png=img_bytes[:8]==b"\x89PNG\r\n\x1a\n"
+            j=requests.post(up,files={"photo":("i.png" if png else "i.jpg",img_bytes,
+                                               "image/png" if png else "image/jpeg")},timeout=120).json()
             p=vk("photos.saveWallPhoto",group_id=gid,photo=j["photo"],server=j["server"],hash=j["hash"])[0]
             atts.append(f"photo{p['owner_id']}_{p['id']}")
         except: pass
@@ -361,4 +366,3 @@ try:
 except Exception as e: log("Этап 6","❌",str(e))
 
 finish()
-
