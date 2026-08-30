@@ -37,6 +37,14 @@ def clean(s):
         s=html.unescape(s); s=re.sub(r"<[^>]+>"," ",s)
     return re.sub(r"\s+"," ",s).strip()
 
+def abs_url(u):
+    u=u.strip()
+    if not u or u.startswith("data:"): return ""
+    if u.startswith("//"): return "https:"+u
+    if u.startswith("/"): return SITE+u
+    if u.startswith("http"): return u
+    return ""
+
 def good_text(t):
     if not t or len(t)<350: return False
     bad=['"error"',"Payment Required","pollen","<html","<!DOCTYPE","{","@context","</span"]
@@ -128,6 +136,7 @@ except Exception as e: log("Этап 1","❌",str(e)); finish(); sys.exit(1)
 try: hist=set(json.load(open(HISTORY,encoding="utf-8"))) if os.path.exists(HISTORY) else set()
 except: hist=set()
 title=body=page=desc=site_img=""
+img_cands=[]
 for _ in range(5):
     page=random.choice([u for u in urls if u not in hist] or urls)
     r=requests.get(page,timeout=60,headers=UA).text
@@ -144,11 +153,26 @@ for _ in range(5):
     for mk in ["Назад к списку","Нужна консультация","Подробная информация"]:
         i=tail.find(mk)
         if i!=-1: tail=tail[:i]
-    im=re.search(r'<meta[^>]+property=["\']og:image["\'][^>]+content=["\']([^"\']*)',r,re.S|re.I)
-    if not im: im=re.search(r'<img[^>]+src=["\']([^"\']*)',tail,re.S|re.I)
-    site_img=(im.group(1) if im else "").strip()
-    if site_img.startswith("//"): site_img="https:"+site_img
-    elif site_img.startswith("/"): site_img=SITE+site_img
+    # Собираем ВСЕ картинки страницы: og:image + все img (src, data-src, srcset)
+    img_cands=[]
+    og=re.search(r'<meta[^>]+property=["\']og:image["\'][^>]+content=["\']([^"\']*)',r,re.S|re.I)
+    if og:
+        u=abs_url(og.group(1))
+        if u: img_cands.append(u)
+    for mm in re.finditer(r"<img[^>]+>",tail,re.S|re.I):
+        tag=mm.group(0); u=""
+        for attr in ["data-src","data-lazy-src","data-original"]:
+            am=re.search(attr+r'=["\']([^"\']*)',tag,re.I)
+            if am and am.group(1).strip(): u=am.group(1); break
+        if not u:
+            am=re.search(r'srcset=["\']([^"\']*)',tag,re.I)
+            if am and am.group(1).strip(): u=am.group(1).split(",")[0].strip().split(" ")[0]
+        if not u:
+            am=re.search(r'src=["\']([^"\']*)',tag,re.I)
+            if am: u=am.group(1)
+        u=abs_url(u)
+        if u and u not in img_cands: img_cands.append(u)
+    site_img=img_cands[0] if img_cands else ""
     paras=re.findall(r"<p[^>]*>(.*?)</p>",tail,re.S|re.I)
     raw=" ".join(clean(p) for p in paras)
     if len(raw)<100: raw=clean(tail)
@@ -158,18 +182,18 @@ for _ in range(5):
     if title and "не найдена" not in title.lower() and (len(body)>100 or len(desc)>60): break
     log("Этап 2","✅",page)
     log("Этап 3","✅" if (len(body)>100 or len(desc)>60) else "⚠️",
-        f"«{title}», desc: {len(desc)}, text: {len(body)}, фото: {'да' if site_img else 'нет'}")
+        f"«{title}», desc: {len(desc)}, text: {len(body)}, фото: {len(img_cands)} канд.")
 
 # --- Этап 4: битва двух ИИ ---
 def tpl():
     base=desc or body
     sents=[s for s in re.split(r"(?<=[.!?])\s+",base) if 40<len(s)<220][:4]
     hook=random.choice([f"🚀 PAVRUS: {title}",f"💡 {title}",f"📢 {title}"])
-    tail=f"\n\n🔗 {page}\n🏢 Оборудование для конференц-залов\n📩 pavrus.run\n#PAVRUS #AVоборудование"
+    tl=f"\n\n🔗 {page}\n🏢 Оборудование для конференц-залов\n📩 pavrus.run\n#PAVRUS #AVоборудование"
     for n in range(len(sents),0,-1):
-        t=f"{hook}\n\n"+"\n".join("▪️ "+s for s in sents[:n])+tail
+        t=f"{hook}\n\n"+"\n".join("▪️ "+s for s in sents[:n])+tl
         if 350<=len(t)<=700: return t
-    t=f"{hook}\n\n▪️ {base[:500]}{tail}"
+    t=f"{hook}\n\n▪️ {base[:500]}{tl}"
     if len(t)<350: t+="\n\nПрофессиональное решение."
     return t[:700]
 
@@ -219,11 +243,11 @@ if not text: text,src=tpl(),"шаблон"
 text=re.sub(r"https://pavrus.(?![a-zA-Z])","https://pavrus.ru",text)
 
 # Ссылка и хэштеги добавляются ПОСЛЕ обрезки — они будут в посте всегда
-tail=""
-if page not in text: tail+=f"\n\n🔗 {page}"
-if "#PAVRUS" not in text: tail+="\n#PAVRUS #AVоборудование"
-if tail:
-    text=trim(text,700-len(tail))+tail
+add=""
+if page not in text: add+=f"\n\n🔗 {page}"
+if "#PAVRUS" not in text: add+="\n#PAVRUS #AVоборудование"
+if add:
+    text=trim(text,700-len(add))+add
 else:
     text=trim(text)
 log("Этап 4","✅" if src!="шаблон" else "⚠️",f"{src}, {len(text)} симв.")
@@ -256,27 +280,34 @@ try:
     else: log("Этап 5","⚠️","не изображение")
 except Exception as e: log("Этап 5","⚠️",str(e)[:80])
 
-site_bytes=b""
-if site_img:
+# --- Этап 5б: выбираем САМУЮ КРУПНУЮ картинку страницы ---
+site_bytes=b""; best_w=0; best_wh=(0,0)
+for u in img_cands[:6]:
     try:
-        rs=requests.get(site_img,timeout=60,headers=UA)
-        if rs.headers.get("content-type","").startswith("image") and 1000<len(rs.content)<20*1024*1024:
-            data=rs.content
-            if PIL_OK:
-                w,h=Image.open(io.BytesIO(data)).size
-                if max(w,h)<200:
-                    log("Этап 5б","⚠️",f"фото с сайта {w}x{h} — слишком мелкое (логотип), пропускаю")
-                elif max(w,h)<1000:
-                    site_bytes=smart_canvas(data)
-                    log("Этап 5б","✅",f"фото с сайта {w}x{h} → на белой подложке 1280, без растягивания")
-                else:
-                    site_bytes=data
-                    log("Этап 5б","✅",f"фото с сайта: {len(site_bytes)} байт, {w}x{h}")
-            else:
-                site_bytes=data
-                log("Этап 5б","✅",f"фото с сайта: {len(site_bytes)} байт (без Pillow)")
-        else: log("Этап 5б","⚠️","не изображение")
-    except Exception as e: log("Этап 5б","⚠️",str(e)[:80])
+        rs=requests.get(u,timeout=30,headers=UA)
+        if not rs.headers.get("content-type","").startswith("image"): continue
+        if not (1000<len(rs.content)<20*1024*1024): continue
+        if PIL_OK:
+            w,h=Image.open(io.BytesIO(rs.content)).size
+        else:
+            w,h=1200,1200
+        if w>best_w:
+            best_w=w; best_wh=(w,h); site_bytes=rs.content
+        if w>=1000: break
+    except Exception:
+        continue
+if site_bytes:
+    w,h=best_wh
+    if max(w,h)<200:
+        log("Этап 5б","⚠️",f"фото с сайта {w}x{h} — слишком мелкое (логотип), пропускаю")
+        site_bytes=b""
+    elif max(w,h)<1000:
+        site_bytes=smart_canvas(site_bytes)
+        log("Этап 5б","✅",f"фото с сайта {w}x{h} → на белой подложке 1280, без растягивания")
+    else:
+        log("Этап 5б","✅",f"фото с сайта: {len(site_bytes)} байт, {w}x{h}")
+else:
+    log("Этап 5б","⚠️","крупное фото с сайта не найдено")
 
 # --- Этап 6: ВК ---
 def vk(method,token=None,**kw):
