@@ -53,7 +53,7 @@ def good_img(b):
     return True
 
 def smart_canvas(data, target=1280):
-    """Кладёт мелкую картинку БЕЗ масштабирования на белую подложку,
+    """Кладёт картинку БЕЗ масштабирования на белую подложку,
     чтобы ВК растягивал только пустое поле, а фото осталось в своём разрешении."""
     im = Image.open(io.BytesIO(data))
     w, h = im.size
@@ -254,15 +254,19 @@ if site_img:
     try:
         rs=requests.get(site_img,timeout=60,headers=UA)
         if rs.headers.get("content-type","").startswith("image") and 1000<len(rs.content)<20*1024*1024:
-            site_bytes=rs.content
+            data=rs.content
             if PIL_OK:
-                w,h=Image.open(io.BytesIO(site_bytes)).size
-                if max(w,h)<1000:
-                    site_bytes=smart_canvas(site_bytes)
+                w,h=Image.open(io.BytesIO(data)).size
+                if max(w,h)<200:
+                    log("Этап 5б","⚠️",f"фото с сайта {w}x{h} — слишком мелкое (логотип), пропускаю")
+                elif max(w,h)<1000:
+                    site_bytes=smart_canvas(data)
                     log("Этап 5б","✅",f"фото с сайта {w}x{h} → на белой подложке 1280, без растягивания")
                 else:
+                    site_bytes=data
                     log("Этап 5б","✅",f"фото с сайта: {len(site_bytes)} байт, {w}x{h}")
             else:
+                site_bytes=data
                 log("Этап 5б","✅",f"фото с сайта: {len(site_bytes)} байт (без Pillow)")
         else: log("Этап 5б","⚠️","не изображение")
     except Exception as e: log("Этап 5б","⚠️",str(e)[:80])
@@ -282,6 +286,9 @@ try:
     def upl(data):
         up=vk("photos.getWallUploadServer",group_id=gid,token=VK_USER_TOKEN)["upload_url"]
         j=requests.post(up,files={"photo":("i.jpg",data,"image/jpeg")},timeout=120).json()
+        if not j.get("photo"):
+            log("Этап 6а(debug)","⚠️",f"ответ сервера загрузки: {str(j)[:120]}")
+            raise RuntimeError("сервер загрузки не вернул photo")
         p=None; errs=[]
         for ex in [{"group_id":gid},{}]:
             try:
