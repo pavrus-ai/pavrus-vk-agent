@@ -191,7 +191,7 @@ def tpl():
     base=desc or body
     sents=[s for s in re.split(r"(?<=[.!?])\s+",base) if 40<len(s)<220][:4]
     hook=random.choice([f"🚀 PAVRUS: {title}",f"💡 {title}",f"📢 {title}"])
-    tl=f"\n\n🔗 {page}\n🏢 Оборудование для конференц-залов\n📩 pavrus.run\n#PAVRUS #AVоборудование"
+    tl=f"\n\n🔗 {page}\n🏢 Оборудование для конференц-залов\n📩 pavrus.ru\n#PAVRUS #AVоборудование"
     for n in range(len(sents),0,-1):
         t=f"{hook}\n\n"+"\n".join("▪️ "+s for s in sents[:n])+tl
         if 350<=len(t)<=700: return t
