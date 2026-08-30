@@ -1,5 +1,6 @@
+
 # -*- coding: utf-8 -*-
-import os, re, json, html, random, sys, urllib.parse, requests, io
+import os, re, json, html, random, sys, urllib.parse, requests, io, time
 try:
     from PIL import Image
     PIL_OK=True
@@ -25,6 +26,8 @@ rep=[]
 
 def log(s,st,m):
     l=f"{s}{st}{m}"; print(l,flush=True); rep.append(l)
+
+log("Версия","ℹ️","v8: повторы загрузки + ссылка после обрезки + PNG-подложка")
 
 def finish():
     if TG_TOKEN and TG_CHAT:
@@ -153,7 +156,6 @@ for _ in range(5):
     for mk in ["Назад к списку","Нужна консультация","Подробная информация"]:
         i=tail.find(mk)
         if i!=-1: tail=tail[:i]
-    # Собираем ВСЕ картинки страницы: og:image + все img (src, data-src, srcset)
     img_cands=[]
     og=re.search(r'<meta[^>]+property=["\']og:image["\'][^>]+content=["\']([^"\']*)',r,re.S|re.I)
     if og:
@@ -322,14 +324,19 @@ try:
     if not gid.isdigit(): gid=str(vk("groups.getById",group_id=gid)[0]["id"])
 
     def upl(data):
-        up=vk("photos.getWallUploadServer",group_id=gid,token=VK_USER_TOKEN)["upload_url"]
+        """Загрузка с 3 попытками — против случайных сбоев сервера ВК"""
         png=data[:8]==b"\x89PNG\r\n\x1a\n"
         fn="i.png" if png else "i.jpg"
         mt="image/png" if png else "image/jpeg"
-        j=requests.post(up,files={"photo":(fn,data,mt)},timeout=120).json()
-        if not j.get("photo"):
-            log("Этап 6а(debug)","⚠️",f"ответ сервера загрузки: {str(j)[:120]}")
-            raise RuntimeError("сервер загрузки не вернул photo")
+        j=None
+        for attempt in range(3):
+            up=vk("photos.getWallUploadServer",group_id=gid,token=VK_USER_TOKEN)["upload_url"]
+            j=requests.post(up,files={"photo":(fn,data,mt)},timeout=120).json()
+            if j.get("photo"): break
+            log("Этап 6а(debug)","⚠️",f"попытка {attempt+1}/3: сервер вернул пустое photo, повторяю...")
+            time.sleep(2)
+        if not j or not j.get("photo"):
+            raise RuntimeError("сервер загрузки не вернул photo после 3 попыток")
         p=None; errs=[]
         for ex in [{"group_id":gid},{}]:
             try:
@@ -349,9 +356,7 @@ try:
     if not atts and img_bytes:
         try:
             up=vk("photos.getWallUploadServer",group_id=gid)["upload_url"]
-            png=img_bytes[:8]==b"\x89PNG\r\n\x1a\n"
-            j=requests.post(up,files={"photo":("i.png" if png else "i.jpg",img_bytes,
-                                               "image/png" if png else "image/jpeg")},timeout=120).json()
+            j=requests.post(up,files={"photo":("i.jpg",img_bytes,"image/jpeg")},timeout=120).json()
             p=vk("photos.saveWallPhoto",group_id=gid,photo=j["photo"],server=j["server"],hash=j["hash"])[0]
             atts.append(f"photo{p['owner_id']}_{p['id']}")
         except: pass
@@ -366,3 +371,4 @@ try:
 except Exception as e: log("Этап 6","❌",str(e))
 
 finish()
+
