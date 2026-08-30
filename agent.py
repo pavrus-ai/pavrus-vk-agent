@@ -27,7 +27,7 @@ rep=[]
 def log(s,st,m):
     l=f"{s}{st}{m}"; print(l,flush=True); rep.append(l)
 
-log("Версия","ℹ️","v8: повторы загрузки + ссылка после обрезки + PNG-подложка")
+log("Версия","ℹ️","v9: перекодировка JPEG + ссылка/хэштеги с логом + PNG-подложка")
 
 def finish():
     if TG_TOKEN and TG_CHAT:
@@ -250,6 +250,7 @@ if page not in text: add+=f"\n\n🔗 {page}"
 if "#PAVRUS" not in text: add+="\n#PAVRUS #AVоборудование"
 if add:
     text=trim(text,700-len(add))+add
+    log("Этап 4б","✅",f"ссылка и хэштеги добавлены (+{len(add)} симв.)")
 else:
     text=trim(text)
 log("Этап 4","✅" if src!="шаблон" else "⚠️",f"{src}, {len(text)} симв.")
@@ -278,7 +279,14 @@ try:
     u=f"https://image.pollinations.ai/prompt/{p}?width=1200&height=800&nologo=true&seed={random.randint(1,999999)}"
     resp=requests.get(u,timeout=180)
     if resp.headers.get("content-type","").startswith("image"):
-        img_bytes=resp.content; log("Этап 5","✅",f"{len(img_bytes)} байт, {ip[:50]}")
+        img_bytes=resp.content
+        # Перекодировка в чистый базовый JPEG — чтобы сервер ВК принял файл
+        if PIL_OK:
+            try:
+                im=Image.open(io.BytesIO(img_bytes)).convert("RGB")
+                b=io.BytesIO(); im.save(b,"JPEG",quality=90); img_bytes=b.getvalue()
+            except Exception as e: log("Этап 5","⚠️",f"перекодировка: {str(e)[:60]}")
+        log("Этап 5","✅",f"{len(img_bytes)} байт, {ip[:50]}")
     else: log("Этап 5","⚠️","не изображение")
 except Exception as e: log("Этап 5","⚠️",str(e)[:80])
 
