@@ -1,0 +1,37 @@
+name: Pavrus Dzen Agent
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 10 * * *"
+
+jobs:
+  pavrus-dzen:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+      
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          
+      - run: pip install requests Pillow
+      
+      - name: Run Pavrus Dzen agent
+        run: python pavrus_dzen_agent.py
+        env:
+          GROQ_KEY: ${{ secrets.GROQ_KEY }}
+          OPENROUTER_KEY: ${{ secrets.OPENROUTER_KEY }}
+          
+      - name: Commit and push Dzen files
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          
+          git add dzen-rss.xml a/ img/ dzen_history.json
+          git diff --quiet && git diff --staged --quiet || (git commit -m "chore: update pavrus dzen-rss and articles [skip ci]" && git push)
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
