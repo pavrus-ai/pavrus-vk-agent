@@ -1,73 +1,93 @@
 # -*- coding: utf-8 -*-
-import os, re, json, html, random, sys, urllib.parse, requests, io, time, datetime
-from xml.etree.ElementTree import Element, SubElement, tostring, parse
-from xml.dom import minidom
+import os, re, json, html, random, sys, io, time, datetime, requests, urllib3
+from PIL import Image
+urllib3.disable_warnings()
+
+VK_TOKEN = os.environ.get("VK_TOKEN", "").strip()            # групповой токен — посты
+VK_USER_TOKEN = os.environ.get("VK_USER_TOKEN", "").strip()  # пользовательский — загрузка фото
+VK_GROUP_ID = os.environ.get("VK_GROUP_ID", "").strip().lstrip("-")
+TG_BOT = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
+TG_CHAT = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
+GROQ_KEY = os.environ.get("GROQ_KEY", "").strip()
+OR_KEY = os.environ.get("OPENROUTER_KEY", "").strip()
 
 SITE = "https://pavrus.ru"
 SITEMAP = SITE + "/sitemap.xml"
-HISTORY = "dzen_history.json"
-UA = {"User-Agent": "Mozilla/5.0 (pavrus-dzen-agent)"}
-
-# Ключи: сначала пробуем KEY2 (для Дзена), если нет — обычные
-GROQ_KEY = os.getenv("GROQ_KEY2", "") or os.getenv("GROQ_KEY", "")
-OR_KEY = os.getenv("OPENROUTER_KEY2", "") or os.getenv("OPENROUTER_KEY", "")
-
-# Только эти бренды (в нижнем регистре для поиска)
+HISTORY = "history_vk.json"
+API = "https://api.vk.com/method/"
+VK_V = "5.131"
+UA = {"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/126.0 Safari/537.36"}
 BRANDS = ["pavrus", "chartu", "restmoment", "htdz"]
+BL = ["корзин", "кабинет", "избранн", "сравнени", "войти", "заказать звонок",
+      "санкт-петербург", "москва", "новосибирск", "8 (800", "info@", "показать еще",
+      "ваш город", "бесплатная доставка", "главная", "обратная связь", "каталог"]
 
-# Блокировка нежелательных слов
-BL = ["Корзина", "Кабинет", "Избранные", "Сравнение", "Каталог", "Войти",
-      "Заказать звонок", "Санкт-Петербург", "Москва", "Новосибирск",
-      "8 (800)", "info@", "pavrus.ru", "Показать еще", "Ваш город",
-      "Бесплатная доставка", "Главная", "Обратная связь"]
-
-SITE_URL = "https://pavrus-ai.github.io/pavrus-vk-agent"
-MAX_RSS_ITEMS = 15
+CATEGORY_SEEDS = [
+    "https://pavrus.ru/catalog/pavrus-sistema-golosovaniya/",
+    "https://pavrus.ru/catalog/pavrus-potolochnye-gromkogovoriteli/",
+    "https://pavrus.ru/catalog/pavrus-nastennye-gromkogovoriteli/",
+    "https://pavrus.ru/catalog/pavrus-mixer-amp/",
+    "https://pavrus.ru/catalog/pavrus-konferents-sistema/",
+    "https://pavrus.ru/catalog/pavrus-wireless-conferences/",
+    "https://pavrus.ru/catalog/pavrus-videooborudovanie-dlya-konferents-zala/",
+    "https://pavrus.ru/catalog/pavrus-sinkhronnyy-perevod/",
+    "https://pavrus.ru/catalog/pavrus-acoustic-systems-line-array/",
+    "https://pavrus.ru/catalog/zvukovye-protsessory/",
+    "https://pavrus.ru/catalog/pavrus-mikshernye-pulty/",
+    "https://pavrus.ru/catalog/pavrus-radiosistema/",
+    "https://pavrus.ru/catalog/pavrus-usiliteli-moshchnosti/",
+    "https://pavrus.ru/catalog/gotovye-videosteny/",
+    "https://pavrus.ru/catalog/pavrus/",
+    "https://pavrus.ru/catalog/pavrus-videowall-controller/",
+    "https://pavrus.ru/catalog/svetodiodnyy-ekran-led-videostena/",
+    "https://pavrus.ru/catalog/pavrus-proektor/",
+    "https://pavrus.ru/catalog/ekran-Classic-Solution/",
+    "https://pavrus.ru/catalog/pavrus-terminal-vks/",
+    "https://pavrus.ru/catalog/besprovodnaya-sistema-kontenta/",
+    "https://pavrus.ru/catalog/pavrus-kommutator-hdmi/",
+    "https://pavrus.ru/catalog/matrichnyy-kommutator-pavrus/",
+    "https://pavrus.ru/catalog/pavrus-udlinitel-po-ip-i-vitoy-pare/",
+    "https://pavrus.ru/catalog/usilitel-raspredelitel-kramer/",
+]
 
 def log(msg):
     print(msg, flush=True)
 
-log("Версия ℹ️ pavrus-dzen-agent v2 (KEY2 + только /catalog/ + бренды Pavrus/Chartu/Restmoment/HTDZ)")
+log("Версия ℹ️ pavrus-vk-agent v3 (товар → ВК sblgroup + карточка в TG; отбор по H1, фото не мельче 600px)")
 
-# --- ИИ ---
+# ============================================================
+# ИИ
+# ============================================================
+
 def _extract(r):
-    try:
-        return r["choices"][0]["message"]["content"].strip()
-    except (KeyError, IndexError, TypeError):
-        return None
+    try: return r["choices"][0]["message"]["content"].strip()
+    except (KeyError, IndexError, TypeError): return None
 
 def ai_groq(prompt):
-    if not GROQ_KEY:
-        return None
+    if not GROQ_KEY: return None
     try:
         r = requests.post("https://api.groq.com/openai/v1/chat/completions",
             headers={"Authorization": f"Bearer {GROQ_KEY}"},
             json={"model": "llama-3.3-70b-versatile", "temperature": 0.8,
                   "messages": [{"role": "user", "content": prompt + "\n\nВАЖНО: Пиши ТОЛЬКО на русском языке."}]},
             timeout=60).json()
-        if "error" in r:
-            return None
+        if "error" in r: return None
         return _extract(r)
-    except Exception:
-        return None
+    except Exception: return None
 
 def ai_openrouter(prompt, model):
-    if not OR_KEY:
-        return None
+    if not OR_KEY: return None
     try:
         r = requests.post("https://openrouter.ai/api/v1/chat/completions",
             headers={"Authorization": f"Bearer {OR_KEY}", "HTTP-Referer": "https://github.com"},
-            json={"model": model, "temperature": 0.8, "max_tokens": 4000,
+            json={"model": model, "temperature": 0.8, "max_tokens": 2000,
                   "messages": [{"role": "user", "content": prompt + "\n\nВАЖНО: Пиши ТОЛЬКО на русском языке."}]},
             timeout=60).json()
-        if "error" in r:
-            return None
+        if "error" in r: return None
         return _extract(r)
-    except Exception:
-        return None
+    except Exception: return None
 
-def ai_call(prompt, minlen=2500):
-    # Те же модели, что в agent.py + KEY2
+def ai_call(prompt, minlen=400):
     models = [
         ("groq", "llama-3.3-70b-versatile"),
         ("openrouter", "meta-llama/llama-3.3-70b-instruct:free"),
@@ -75,7 +95,6 @@ def ai_call(prompt, minlen=2500):
         ("openrouter", "deepseek/deepseek-chat-v3-0324:free"),
         ("openrouter", "auto")
     ]
-    
     for provider, model in models:
         try:
             log(f"🔄 Попытка: {provider} ({model})...")
@@ -83,15 +102,14 @@ def ai_call(prompt, minlen=2500):
             if res and len(res) >= minlen:
                 log(f"✅ Успех: {provider} ({model}), {len(res)} симв.")
                 return res
-            elif res:
-                log(f"⚠️ {provider}: короткий текст ({len(res)} симв., нужно {minlen})")
-        except Exception as e:
-            log(f"⚠️ {provider} ошибка: {e}")
-    
-    log("❌ Все попытки генерации ИИ не удались")
+        except Exception:
+            pass
     return None
 
-# --- Утилиты ---
+# ============================================================
+# ХЕЛПЕРЫ
+# ============================================================
+
 def clean(s):
     for _ in range(3):
         s = html.unescape(s)
@@ -99,318 +117,285 @@ def clean(s):
     return re.sub(r"\s+", " ", s).strip()
 
 def abs_url(u):
-    u = u.strip()
-    if not u or u.startswith("data:"):
-        return ""
-    if u.startswith("//"):
-        return "https:" + u
-    if u.startswith("/"):
-        return SITE + u
-    if u.startswith("http"):
-        return u
+    u = (u or "").strip()
+    if not u or u.startswith("data:"): return ""
+    if u.startswith("//"): return "https:" + u
+    if u.startswith("/"): return SITE + u
+    if u.startswith("http"): return u
     return ""
 
-# --- Этап 1: Парсинг sitemap ---
-try:
-    xml = requests.get(SITEMAP, timeout=60, headers=UA).text
-    locs = re.findall(r"<loc>\s*(.*?)\s*</loc>", xml)
-    smps = [l for l in locs if "sitemap" in l.lower()] or [SITEMAP]
+def get_h1(r):
+    m = re.search(r"<h1[^>]*>(.*?)</h1>", r, re.S | re.I)
+    return clean(m.group(1)) if m else ""
+
+def get_meta(r, name):
+    for pat in (
+        r'<meta[^>]+name=["\']' + name + r'["\'][^>]+content=["\'](.*?)["\']',
+        r'<meta[^>]+content=["\'](.*?)["\'][^>]+name=["\']' + name + r'["\']',
+    ):
+        m = re.search(pat, r, re.S | re.I)
+        if m:
+            v = clean(m.group(1))
+            if v: return v
+    return ""
+
+def get_og_image(r):
+    for pat in (
+        r'<meta[^>]+property=["\']og:image["\'][^>]+content=["\'](.*?)["\']',
+        r'<meta[^>]+content=["\'](.*?)["\'][^>]+property=["\']og:image["\']',
+    ):
+        m = re.search(pat, r, re.S | re.I)
+        if m:
+            u = abs_url(m.group(1))
+            if u: return u
+    return ""
+
+# ============================================================
+# СБОР И ВЫБОР СТРАНИЦЫ
+# ============================================================
+
+def collect_urls():
     urls = []
-    for sm in smps:
-        x = requests.get(sm, timeout=60, headers=UA).text
-        # ТОЛЬКО /catalog/
-        urls += [u for u in re.findall(r"<loc>\s*(.*?)\s*</loc>", x)
-                 if "/catalog/" in u]
+    try:
+        log("Этап 1: карта сайта...")
+        xml = requests.get(SITEMAP, timeout=30, headers=UA).text
+        locs = re.findall(r"<loc>\s*(.*?)\s*</loc>", xml)
+        smps = [l for l in locs if "sitemap" in l.lower()] or [SITEMAP]
+        for sm in smps:
+            try:
+                x = requests.get(sm, timeout=30, headers=UA).text
+            except Exception:
+                continue
+            urls += [u for u in re.findall(r"<loc>\s*(.*?)\s*</loc>", x) if "/catalog/" in u]
+    except Exception as e:
+        log(f"⚠️ sitemap: {e}")
     urls = sorted(set(urls))
-    if not urls:
-        raise RuntimeError("не найдено страниц в /catalog/")
-    log(f"Этап 1 ✅ страниц в каталоге: {len(urls)}")
-except Exception as e:
-    log(f"Этап 1 ❌ {e}")
-    sys.exit(1)
+    log(f"ℹ️ Ссылок /catalog/: {len(urls)}")
+    if len(urls) < 10:
+        for s in CATEGORY_SEEDS:
+            try:
+                h = requests.get(s, timeout=20, headers=UA).text
+            except Exception:
+                continue
+            for href in re.findall(r'href=["\'](/catalog/[^"\']+)["\']', h):
+                u = abs_url(href)
+                if u and u not in urls:
+                    urls.append(u)
+        urls = sorted(set(urls))
+    def brand_rank(u):
+        return 0 if any(b in u.lower() for b in BRANDS) else 1
+    urls.sort(key=brand_rank)
+    return urls
 
-# --- Этап 2: Выбор страницы с фильтром по брендам ---
-try:
-    hist = set(json.load(open(HISTORY, encoding="utf-8"))) if os.path.exists(HISTORY) else set()
-except:
-    hist = set()
-
-title = body = page = desc = site_img = ""
-img_cands = []
-
-for _ in range(15):
-    available = [u for u in urls if u not in hist]
-    if not available:
-        hist.clear()
-        available = urls
-    
-    page = random.choice(available)
-    r = requests.get(page, timeout=60, headers=UA).text
-    
-    # Проверяем бренд (в нижнем регистре)
-    page_lower = r.lower()
-    if not any(brand in page_lower for brand in BRANDS):
-        log(f"⚠️ Пропуск: {page} (не найдены бренды Pavrus/Chartu/Restmoment/HTDZ)")
-        continue
-    
-    # Извлекаем заголовок
-    m = re.search(r"<title[^>]*>(.*?)</title>", r, re.S | re.I)
-    title = clean(m.group(1)) if m else ""
-    
-    # Извлекаем описание
-    dm = (re.search(r'<meta[^>]+name=["\']description["\'][^>]+content=["\']([^"\']*)', r, re.S | re.I)
-          or re.search(r'<meta[^>]+content=["\']([^"\']*)["\'][^>]+name=["\']description["\']', r, re.S | re.I)
-          or re.search(r'<meta[^>]+property=["\']og:description["\'][^>]+content=["\']([^"\']*)', r, re.S | re.I))
-    desc = clean(dm.group(1)) if dm else ""
-    
-    # Извлекаем основной текст
-    tail = r[m.end():] if m else r
-    tail = re.sub(r"<script[^>]*>.*?</script>", " ", tail, flags=re.S | re.I)
+def parse_page(r, h1):
+    desc = get_meta(r, "description") or get_meta(r, "og:description")
+    tail = re.sub(r"<script[^>]*>.*?</script>", " ", r, flags=re.S | re.I)
     tail = re.sub(r"<style[^>]*>.*?</style>", " ", tail, flags=re.S | re.I)
-    tail = re.sub(r"<nav[^>]*>.*?</nav>", " ", tail, flags=re.S | re.I)
-    tail = re.sub(r"<footer[^>]*>.*?</footer>", " ", tail, flags=re.S | re.I)
-    
     for mk in ["Назад к списку", "Нужна консультация", "Подробная информация"]:
         i = tail.find(mk)
         if i != -1:
             tail = tail[:i]
-    
-    # Извлекаем картинки
-    img_cands = []
-    og = re.search(r'<meta[^>]+property=["\']og:image["\'][^>]+content=["\']([^"\']*)', r, re.S | re.I)
-    if og:
-        u = abs_url(og.group(1))
-        if u:
-            img_cands.append(u)
-    
-    for mm in re.finditer(r"<img[^>]+>", tail, re.S | re.I):
-        tag = mm.group(0)
+    chunks = re.findall(r"<p[^>]*>(.*?)</p>", tail, re.S | re.I)
+    chunks += re.findall(r'<div[^>]+class=["\'][^"\']*(?:descr|text|content|detail|char)[^"\']*["\'][^>]*>(.*?)</div>', tail, re.S | re.I)
+    raw = " ".join(clean(c) for c in chunks)
+    keep = [s.strip() for s in raw.split(". ")
+            if len(s.strip()) > 30 and "{" not in s
+            and not any(b in s.lower() for b in BL)]
+    body = " ".join(keep)[:1500]
+    imgs = []
+    og = get_og_image(r)
+    if og: imgs.append(og)
+    for tag in re.findall(r"<img[^>]+>", tail)[:15]:
         u = ""
-        for attr in ["data-src", "data-lazy-src", "data-original"]:
-            am = re.search(attr + r'=["\']([^"\']*)', tag, re.I)
+        for attr in ("data-src", "data-lazy-src", "data-original", "src"):
+            am = re.search(attr + r'\s*=\s*["\']([^"\']+)["\']', tag, re.I)
             if am and am.group(1).strip():
                 u = am.group(1)
                 break
-        if not u:
-            am = re.search(r'srcset=["\']([^"\']*)', tag, re.I)
-            if am and am.group(1).strip():
-                u = am.group(1).split(",")[0].strip().split(" ")[0]
-        if not u:
-            am = re.search(r'src=["\']([^"\']*)', tag, re.I)
-            if am:
-                u = am.group(1)
-        u = abs_url(u)
-        if u and u not in img_cands:
-            img_cands.append(u)
-    
-    site_img = img_cands[0] if img_cands else ""
-    
-    # Извлекаем параграфы
-    paras = re.findall(r"<p[^>]*>(.*?)</p>", tail, re.S | re.I)
-    raw = " ".join(clean(p) for p in paras)
-    
-    keep = [s for s in raw.split(". ") if len(s) > 40 and "{" not in s and '"' not in s and not any(b in s for b in BL)]
-    body = " ".join(keep)[:2000]
-    
-    if title and "не найдена" not in title.lower() and (len(body) > 200 or len(desc) > 100) and site_img:
-        break
-    
-    log(f"Этап 2 ⚠️ {page}: title={len(title)}, body={len(body)}, img={len(img_cands)}")
+        u = abs_url(u.split(",")[0].strip().split(" ")[0])
+        if u and u not in imgs and not any(x in u.lower() for x in ("logo", "svg", "icon", "banner")):
+            imgs.append(u)
+    return desc, body, imgs
 
-if not (title and body and site_img):
-    log("❌ Не удалось найти подходящую страницу")
-    sys.exit(1)
-
-log(f"Этап 2 ✅ {page}")
-log(f"Этап 3 ✅ «{title}», desc: {len(desc)}, text: {len(body)}, фото: {len(img_cands)} канд.")
-
-# Добавляем в историю
-hist.add(page)
-json.dump(list(hist), open(HISTORY, "w", encoding="utf-8"), ensure_ascii=False)
-
-# --- Этап 4: Генерация длинной статьи для Дзена ---
-prompt = (
-    f"Напиши развёрнутую статью для платформы Дзен о продукте компании Pavrus.\n\n"
-    f"НАЗВАНИЕ ПРОДУКТА: {title}\n"
-    f"ОПИСАНИЕ: {desc}\n"
-    f"ХАРАКТЕРИСТИКИ И ДЕТАЛИ: {body[:1500]}\n"
-    f"ССЫЛКА НА ПРОДУКТ: {page}\n\n"
-    f"ТРЕБОВАНИЯ:\n"
-    f"1. ТОЛЬКО русский язык.\n"
-    f"2. Длина СТРОГО 2500-4000 символов.\n"
-    f"3. Первая строка — заголовок ЗАГЛАВНЫМИ буквами, без ** и ##.\n"
-    f"4. Пиши как эксперт по профессиональному AV-оборудованию: живо, уникально, без пафоса и кликбейта.\n"
-    f"5. Структура: заголовок, введение (2-3 абзаца), основная часть (4-6 абзацев с описанием преимуществ и применения), заключение.\n"
-    f"6. Подчеркни профессиональное применение оборудования (конференц-залы, презентации, мероприятия).\n"
-    f"7. В конце добавь: «Подробнее о продукте: {page}»\n\n"
-    f"Статья должна быть полезной для специалистов по AV-оборудованию и интеграции."
-)
-
-article = ai_call(prompt, minlen=2500)
-if not article:
-    log("❌ Не удалось сгенерировать статью")
-    sys.exit(1)
-
-log(f"Этап 4 ✅ Статья создана: {len(article)} символов")
-
-lines = article.split('\n')
-headline = lines[0].strip().upper() if lines else title.upper()
-content = '\n'.join(lines[1:]).strip() if len(lines) > 1 else article
-
-# --- Этап 5: Скачиваем картинку со страницы ---
-img_bytes = b""
-best_w = 0
-best_wh = (0, 0)
-
-for u in img_cands[:6]:
-    try:
-        rs = requests.get(u, timeout=30, headers=UA)
-        if not rs.headers.get("content-type", "").startswith("image"):
-            continue
-        if not (1000 < len(rs.content) < 5000000):
-            continue
-        
+def pick_page(urls, hist):
+    for attempt in range(25):
+        available = [u for u in urls if u not in hist]
+        if not available:
+            log("ℹ️ История полная — начинаю круг заново")
+            available = urls
+        page = random.choice(available[:300])
         try:
-            from PIL import Image
+            r = requests.get(page, timeout=30, headers=UA).text
+        except Exception:
+            log(f"⚠️ Попытка {attempt+1}: не открылось — {page}")
+            continue
+        h1 = get_h1(r)
+        if not h1:
+            log(f"⚠️ Попытка {attempt+1}: нет H1 — {page}")
+            continue
+        if not any(b in h1.lower() for b in BRANDS):
+            log(f"⚠️ Попытка {attempt+1}: в H1 нет бренда («{h1[:50]}») — {page}")
+            continue
+        desc, body, imgs = parse_page(r, h1)
+        if len(body) + len(desc) < 40:
+            log(f"⚠️ Попытка {attempt+1}: мало текста — {page}")
+            continue
+        log(f"✅ Попытка {attempt+1}: товар «{h1[:70]}» — {page}")
+        return page, h1, desc, body, imgs
+    return None, "", "", "", []
+
+# ============================================================
+# ФОТО: только нормальные размеры (никаких логотипов 226x59)
+# ============================================================
+
+def choose_image(imgs):
+    best, best_px = None, 0
+    for u in imgs[:8]:
+        try:
+            rs = requests.get(u, timeout=30, headers=UA)
+            if not rs.headers.get("content-type", "").startswith("image"):
+                continue
+            if not (20000 < len(rs.content) < 5000000):
+                continue
             im = Image.open(io.BytesIO(rs.content))
             w, h = im.size
-            if w * h > best_w:
-                best_w = w * h
-                best_wh = (w, h)
-                img_bytes = rs.content
-            if w >= 1000:
-                break
-        except:
-            img_bytes = rs.content
-            break
-    except Exception:
-        continue
+            if w < 600 or h < 400:
+                continue
+            if w * h > best_px:
+                best_px, best = w * h, rs.content
+        except Exception:
+            continue
+    if best:
+        log(f"✅ Фото товара: {len(best)} байт")
+    else:
+        log("⚠️ Подходящего фото нет — пост без картинки")
+    return best
 
-if not img_bytes:
-    log("⚠️ Не удалось скачать картинку")
-    sys.exit(1)
+# ============================================================
+# ВК И TG
+# ============================================================
 
-log(f"Этап 5 ✅ Картинка: {len(img_bytes)} байт, размер: {best_wh}")
+def vk_call(method, params, token):
+    p = dict(params or {})
+    p["access_token"] = token
+    p["v"] = VK_V
+    try:
+        r = requests.post(API + method, data=p, timeout=30).json()
+    except Exception as e:
+        log(f"⚠️ VK {method}: {e}")
+        return None
+    if "error" in r:
+        log(f"⚠️ VK {method}: {str(r.get('error'))[:150]}")
+        return None
+    return r.get("response")
 
-# --- Этап 6: Сохранение HTML ---
-day = datetime.date.today().toordinal()
-slug = hashlib.md5(f"{title}-{day}".encode()).hexdigest()[:12]
-filename = f"a/dzen_{slug}.html"
-img_filename = f"img/dzen_{slug}.jpg"
-
-os.makedirs("a", exist_ok=True)
-os.makedirs("img", exist_ok=True)
-
-content_escaped = content.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
-content_html = content_escaped.replace('\n', '<br>\n')
-
-html_content = f"""<!DOCTYPE html>
-<html lang="ru">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>{headline}</title>
-    <meta name="description" content="{content[:200]}">
-    <meta property="og:title" content="{headline}">
-    <meta property="og:description" content="{content[:200]}">
-    <meta property="og:image" content="{SITE_URL}/{img_filename}">
-    <meta property="og:type" content="article">
-</head>
-<body style="font-family:Georgia,serif;background:#141414;color:#eee;margin:0;padding:20px">
-    <article style="max-width:800px;margin:0 auto">
-        <h1>{headline}</h1>
-        <img src="{SITE_URL}/{img_filename}" alt="{headline}" style="width:100%;border-radius:10px">
-        <div style="line-height:1.6">{content_html}</div>
-        <p style="margin-top:30px"><a href="{page}" style="color:#7ab8ff">📖 Подробнее о продукте</a></p>
-    </article>
-</body>
-</html>"""
-
-with open(filename, 'w', encoding='utf-8') as f:
-    f.write(html_content)
-
-with open(img_filename, 'wb') as f:
-    f.write(img_bytes)
-
-log(f"Этап 6 ✅ Статья сохранена: {filename}")
-log(f"Этап 6 ✅ Картинка сохранена: {img_filename}")
-
-# --- Этап 7: RSS ---
-def load_existing_rss():
-    items = []
-    if os.path.exists("dzen-rss.xml"):
+def vk_upload(img_bytes):
+    tok = VK_USER_TOKEN or VK_TOKEN
+    for params in ({"owner_id": "-" + VK_GROUP_ID}, {"group_id": VK_GROUP_ID}):
+        srv = vk_call("photos.getWallUploadServer", params, tok)
+        if not srv or "upload_url" not in srv:
+            continue
         try:
-            tree = parse("dzen-rss.xml")
-            root = tree.getroot()
-            channel = root.find("channel")
-            if channel is not None:
-                for item in channel.findall("item"):
-                    items.append({
-                        "title": item.findtext("title", ""),
-                        "link": item.findtext("link", ""),
-                        "guid": item.findtext("guid", ""),
-                        "pub_date": item.findtext("pubDate", ""),
-                        "description": item.findtext("description", ""),
-                        "content": item.findtext("{http://purl.org/rss/1.0/modules/content/}encoded", ""),
-                        "img_url": item.find("enclosure").get("url", "") if item.find("enclosure") is not None else ""
-                    })
-        except Exception as e:
-            log(f"⚠️ Ошибка чтения старого RSS: {e}")
-    return items
+            r = requests.post(srv["upload_url"],
+                files={"photo": ("product.jpg", img_bytes, "image/jpeg")}, timeout=120).json()
+        except Exception:
+            continue
+        if "photo" not in r:
+            continue
+        sp = dict(params)
+        sp.update({"photo": r["photo"], "server": r.get("server", ""), "hash": r.get("hash", "")})
+        saved = vk_call("photos.saveWallPhoto", sp, tok)
+        if saved:
+            p = saved[0]
+            att = f"photo{p['owner_id']}_{p['id']}"
+            if p.get("access_key"):
+                att += f"_{p['access_key']}"
+            log(f"✅ ВК: фото загружено → {att}")
+            return att
+    return None
 
-def generate_rss(new_item, existing_items):
-    rss = Element('rss', version='2.0')
-    rss.set('xmlns:content', 'http://purl.org/rss/1.0/modules/content/')
-    rss.set('xmlns:atom', 'http://www.w3.org/2005/Atom')
+def vk_post(message, att):
+    params = {"owner_id": "-" + VK_GROUP_ID, "message": message, "from_group": 1}
+    if att:
+        params["attachments"] = att
+    res = vk_call("wall.post", params, VK_TOKEN)
+    if res:
+        log(f"✅ ВК: пост опубликован: https://vk.com/wall-{VK_GROUP_ID}_{res.get('post_id')}")
+        return True
+    return False
 
-    channel = SubElement(rss, 'channel')
-    SubElement(channel, 'title').text = "Pavrus — Профессиональное AV-оборудование"
-    SubElement(channel, 'link').text = SITE_URL
-    SubElement(channel, 'description').text = "Обзоры профессионального аудио- и видеооборудования: Pavrus, Chartu, Restmoment, HTDZ."
-    SubElement(channel, 'language').text = "ru-ru"
+def tg_post(img_bytes, caption):
+    if not TG_BOT or not TG_CHAT:
+        log("ℹ️ TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID не заданы — TG пропущен")
+        return
+    caption = caption[:1020].rstrip()
+    if img_bytes:
+        r = requests.post(f"https://api.telegram.org/bot{TG_BOT}/sendPhoto",
+            data={"chat_id": TG_CHAT, "caption": caption},
+            files={"photo": ("product.jpg", img_bytes, "image/jpeg")}, timeout=120).json()
+    else:
+        r = requests.post(f"https://api.telegram.org/bot{TG_BOT}/sendMessage",
+            data={"chat_id": TG_CHAT, "text": caption}, timeout=60).json()
+    if r.get("ok"):
+        log("✅ TG: карточка товара отправлена")
+    else:
+        log(f"⚠️ TG: {str(r)[:150]}")
 
-    all_items = ([new_item] + existing_items)[:MAX_RSS_ITEMS]
+# ============================================================
+# ГЛАВНАЯ ЛОГИКА
+# ============================================================
 
-    for item in all_items:
-        entry = SubElement(channel, 'item')
-        SubElement(entry, 'title').text = item['title']
-        SubElement(entry, 'link').text = item['link']
-        g = SubElement(entry, 'guid')
-        g.text = item['guid']
-        g.set('isPermaLink', 'true')
-        SubElement(entry, 'pubDate').text = item['pub_date']
-        SubElement(entry, 'description').text = item['description']
-        
-        ce = SubElement(entry, '{http://purl.org/rss/1.0/modules/content/}encoded')
-        ce.text = f"<![CDATA[{item['content']}]]>"
-        
-        if item.get('img_url'):
-            enc = SubElement(entry, 'enclosure')
-            enc.set('url', item['img_url'])
-            enc.set('type', 'image/jpeg')
-            enc.set('length', '0')
+def main():
+    urls = collect_urls()
+    try:
+        hist = set(json.load(open(HISTORY, encoding="utf-8"))) if os.path.exists(HISTORY) else set()
+    except Exception:
+        hist = set()
 
-    xml_str = minidom.parseString(tostring(rss, encoding='unicode')).toprettyxml(indent="  ")
-    with open('dzen-rss.xml', 'w', encoding='utf-8') as f:
-        f.write(xml_str)
-    log("✅ RSS-лента сохранена: dzen-rss.xml")
+    page, title, desc, body, imgs = pick_page(urls, hist)
+    if not page:
+        log("❌ Не найден товар с брендом в H1")
+        sys.exit(1)
 
-now = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=3)))
-pub_date = now.strftime("%a, %d %b %Y %H:%M:%S +0300")
+    hist.add(page)
+    json.dump(sorted(hist), open(HISTORY, "w", encoding="utf-8"), ensure_ascii=False)
 
-new_item = {
-    "title": headline,
-    "link": f"{SITE_URL}/{filename}",
-    "guid": f"{SITE_URL}/{filename}",
-    "pub_date": pub_date,
-    "description": content[:300],
-    "content": content,
-    "img_url": f"{SITE_URL}/{img_filename}"
-}
+    prompt = (
+        f"Напиши пост для сообщества ВКонтакте «Группа SBL» о товаре.\n\n"
+        f"ТОВАР: {title}\n"
+        f"ОПИСАНИЕ: {desc}\n"
+        f"ДЕТАЛИ: {body[:900]}\n\n"
+        f"ТРЕБОВАНИЯ:\n"
+        f"1. ТОЛЬКО русский язык.\n"
+        f"2. 500-900 символов, живо и по-деловому, без капса и кликбейта.\n"
+        f"3. Начни с названия товара обычной строкой.\n"
+        f"4. Подчеркни применение: конференц-залы, презентации, мероприятия.\n"
+        f"5. В конце строка: «Подробнее: {page}»\n"
+        f"6. Без хэштегов."
+    )
+    text = ai_call(prompt, 400)
+    if not text:
+        text = f"{title}\n\n{desc or body[:600]}\n\nПодробнее: {page}"
+    text = text.replace("**", "").replace("##", "").strip()
+    if len(text) > 1500:
+        text = text[:1500].rsplit(" ", 1)[0].rstrip() + f"\n\nПодробнее: {page}"
+    log(f"📝 Текст поста: {len(text)} симв.")
 
-existing = load_existing_rss()
-generate_rss(new_item, existing)
+    img = choose_image(imgs)
+    att = vk_upload(img) if img else None
+    ok = vk_post(text, att)
+    if not ok:
+        log("❌ ВК: пост не опубликован")
+        sys.exit(1)
+    tg_post(img, text)
 
-log("=" * 50)
-log("✅ FINISH: статья и RSS для Дзена Pavrus готовы!")
-log("=" * 50)
+    log("=" * 50)
+    log("✅ FINISH: товар → ВК sblgroup (+ TG карточка)!")
+    log("=" * 50)
+
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception as e:
+        log(f"❌ КРИТИЧЕСКАЯ ОШИБКА: {e}")
+        raise
