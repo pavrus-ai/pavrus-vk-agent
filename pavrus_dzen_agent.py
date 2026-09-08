@@ -1,7 +1,6 @@
 # -*- coding: utf-8 -*-
 import os, re, sys, json, random, hashlib, datetime, requests, time, html as htmlmod
 from xml.etree.ElementTree import parse
-urllib3_disable = None
 try:
     import urllib3; urllib3.disable_warnings()
 except Exception:
@@ -20,7 +19,6 @@ UA = {"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, 
 BRANDS = ["pavrus", "chartu", "restmoment", "htdz"]
 BL = ["корзин", "цен", "купить", "заказ", "доставк", "гаранти", "cookie", "политик", "в налич", "оформить", "арт.", "артикул"]
 
-# Запасной источник: разделы каталога (даны владельцем сайта)
 CATEGORY_SEEDS = [
     "https://pavrus.ru/catalog/pavrus-sistema-golosovaniya/",
     "https://pavrus.ru/catalog/pavrus-potolochnye-gromkogovoriteli/",
@@ -52,7 +50,7 @@ CATEGORY_SEEDS = [
 def log(msg):
     print(msg, flush=True)
 
-log("Версия ℹ️ pavrus-dzen-agent v5 (товарные URL из вложенных sitemap + разделов, мягкий парсер, лог отбраковки)")
+log("Версия ℹ️ pavrus-dzen-agent v6 (отбор страницы по H1 с брендом + лог каждой попытки)")
 
 # ============================================================
 # ИИ
@@ -125,11 +123,6 @@ def abs_url(u):
     if u.startswith("http"): return u
     return ""
 
-def is_product_url(u):
-    """Товар = /catalog/<раздел>/<товар>/ ; раздел = /catalog/<что-то>/"""
-    path = u.split("?")[0].strip("/").split("/")
-    return len(path) >= 3 and path[0] == "catalog"
-
 def get_meta(r, name):
     for pat in (
         r'<meta[^>]+name=["\']' + name + r'["\'][^>]+content=["\'](.*?)["\']',
@@ -152,12 +145,16 @@ def get_og_image(r):
             if u: return u
     return ""
 
+def get_h1(r):
+    m = re.search(r"<h1[^>]*>(.*?)</h1>", r, re.S | re.I)
+    return clean(m.group(1)) if m else ""
+
 # ============================================================
-# ЭТАП 1: СБОР ТОВАРНЫХ URL
+# ЭТАП 1: СБОР ССЫЛОК /catalog/ ИЗ ВСЕХ ВЛОЖЕННЫХ КАРТ
 # ============================================================
 
 def collect_urls():
-    products, sections = [], []
+    urls = []
     try:
         log("Этап 1: загрузка главной карты сайта...")
         xml = requests.get(SITEMAP, timeout=30, headers=UA).text
@@ -169,48 +166,40 @@ def collect_urls():
                 x = requests.get(sm, timeout=30, headers=UA).text
             except Exception:
                 continue
-            for u in re.findall(r"<loc>\s*(.*?)\s*</loc>", x):
-                if "/catalog/" not in u:
-                    continue
-                (products if is_product_url(u) else sections).append(u)
+            urls += [u for u in re.findall(r"<loc>\s*(.*?)\s*</loc>", x) if "/catalog/" in u]
     except Exception as e:
         log(f"⚠️ sitemap недоступен: {e}")
 
-    products = sorted(set(products))
-    sections = sorted(set(sections))
-    log(f"ℹ️ Из sitemap: товаров={len(products)}, разделов={len(sections)}")
+    urls = sorted(set(urls))
+    log(f"ℹ️ Из карты сайта: ссылок /catalog/: {len(urls)}")
 
-    # Если товаров мало — обходим разделы-сида и собираем карточки сами
-    if len(products) < 10:
-        log("Этап 1b: обход разделов каталога для сбора товарных ссылок...")
-        seeds = list(set(sections + CATEGORY_SEEDS))[:40]
-        for s in seeds:
+    if len(urls) < 10:
+        log("Этап 1b: обход разделов каталога...")
+        for s in CATEGORY_SEEDS:
             try:
                 h = requests.get(s, timeout=20, headers=UA).text
             except Exception:
                 continue
-            for href in re.findall(r'href=["\'](/catalog/[^"\']+/[^"\']+/?)["\']', h):
+            for href in re.findall(r'href=["\'](/catalog/[^"\']+)["\']', h):
                 u = abs_url(href)
-                if u and is_product_url(u) and u not in products:
-                    products.append(u)
-        products = sorted(set(products))
-        log(f"ℹ️ После обхода разделов: товаров={len(products)}")
+                if u and u not in urls:
+                    urls.append(u)
+        urls = sorted(set(urls))
+        log(f"ℹ️ После обхода разделов: ссылок /catalog/: {len(urls)}")
 
-    # Приоритет — URL с брендом в адресе
+    # Приоритет — ссылки с брендом в адресе
     def brand_rank(u):
         ul = u.lower()
         return 0 if any(b in ul for b in BRANDS) else 1
-    products.sort(key=brand_rank)
-    return products
+    urls.sort(key=brand_rank)
+    return urls
 
 # ============================================================
-# ЭТАП 2: ВЫБОР И ПАРСИНГ СТРАНИЦЫ
+# ЭТАП 2: ВЫБОР СТРАНИЦЫ ПО H1 С БРЕНДОМ
 # ============================================================
 
-def parse_page(r):
-    title = ""
-    m = re.search(r"<h1[^>]*>(.*?)</h1>", r, re.S | re.I)
-    if m: title = clean(m.group(1))
+def parse_page(r, h1):
+    title = h1
     if not title:
         m = re.search(r"<title[^>]*>(.*?)</title>", r, re.S | re.I)
         title = clean(m.group(1)) if m else ""
@@ -220,7 +209,6 @@ def parse_page(r):
     tail = re.sub(r"<script[^>]*>.*?</script>", " ", r, flags=re.S | re.I)
     tail = re.sub(r"<style[^>]*>.*?</style>", " ", tail, flags=re.S | re.I)
 
-    # МЯГКИЙ парсер: абзацы И div'ы с описанием (descr/text/content/detail)
     chunks = re.findall(r"<p[^>]*>(.*?)</p>", tail, re.S | re.I)
     chunks += re.findall(r'<div[^>]+class=["\'][^"\']*(?:descr|text|content|detail)[^"\']*["\'][^>]*>(.*?)</div>', tail, re.S | re.I)
     raw = " ".join(clean(c) for c in chunks)
@@ -245,34 +233,37 @@ def parse_page(r):
     return title, desc, body, imgs
 
 def pick_page(urls, hist):
-    for attempt in range(20):
+    for attempt in range(25):
         available = [u for u in urls if u not in hist]
         if not available:
             log("ℹ️ История покрывает все страницы — начинаю круг заново")
             available = urls
-        page = random.choice(available[:200])
+        page = random.choice(available[:300])
         try:
             r = requests.get(page, timeout=30, headers=UA).text
-        except Exception as e:
-            log(f"⚠️ Попытка {attempt+1}: страница не открылась ({page}) — {e}")
+        except Exception:
+            log(f"⚠️ Попытка {attempt+1}: страница не открылась — {page}")
             continue
-        low = r.lower()
-        if not any(b in low for b in BRANDS):
-            log(f"⚠️ Попытка {attempt+1}: нет бренда на странице — {page}")
+
+        h1 = get_h1(r)
+        if not h1:
+            log(f"⚠️ Попытка {attempt+1}: нет тега H1 — {page}")
             continue
-        title, desc, body, imgs = parse_page(r)
-        if not title or "не найдена" in title.lower() or "404" in title:
-            log(f"⚠️ Попытка {attempt+1}: пустой/404 заголовок — {page}")
+        if not any(b in h1.lower() for b in BRANDS):
+            log(f"⚠️ Попытка {attempt+1}: в H1 нет бренда («{h1[:60]}») — {page}")
             continue
-        if len(body) < 150 and len(desc) < 80:
-            log(f"⚠️ Попытка {attempt+1}: мало текста (body={len(body)}, desc={len(desc)}) — {page}")
+
+        title, desc, body, imgs = parse_page(r, h1)
+        if len(body) + len(desc) < 40:
+            log(f"⚠️ Попытка {attempt+1}: H1 подходит, но текста мало — {page}")
             continue
-        log(f"✅ Попытка {attempt+1}: страница подошла — {page}")
+
+        log(f"✅ Попытка {attempt+1}: страница подходит по H1 «{h1[:80]}» — {page}")
         return page, title, desc, body, (imgs[0] if imgs else "")
     return None, "", "", "", ""
 
 # ============================================================
-# ТЕКСТ, КАРТИНКА, HTML, RSS
+# КАРТИНКА, HTML, RSS
 # ============================================================
 
 def generate_image(title, desc):
@@ -354,20 +345,16 @@ def main():
     except Exception:
         hist = set()
 
-    use_fallback = False
     page, title, desc, body, site_img = pick_page(urls, hist) if urls else (None, "", "", "", "")
     if not page:
-        log("⚠️ Сайт не дал подходящую товарную страницу — беру тему из topics.json")
-        use_fallback = True
-
-    if use_fallback:
+        log("⚠️ Сайт не дал страницу с брендом в H1 — беру тему из topics.json")
         try:
             topics = json.load(open(TOPICS_FILE, encoding="utf-8"))["topics"]
             avail = [t for t in topics if t.get("url") not in hist] or topics
             topic = random.choice(avail)
             page, title, desc, body = topic["url"], topic["title"], topic["about"], topic["about"]
             site_img = ""
-            log(f"Этап 2 ✅ (fallback) Тема: «{title}»")
+            log(f"Этап 2 ✅ (запасной вариант) Тема: «{title}»")
         except Exception as e:
             log(f"❌ Ошибка чтения topics.json: {e}")
             sys.exit(1)
@@ -398,6 +385,12 @@ def main():
     if not article:
         log("❌ Не удалось сгенерировать статью")
         sys.exit(1)
+    # Защита от слишком длинных статей (модель иногда выдаёт 10к+)
+    if len(article) > 4200:
+        cut = article[:4000]
+        i = cut.rfind("\n")
+        article = cut[:i].rstrip() + f"\n\nПодробнее о продукте: {page}"
+        log(f"✂️ Статья обрезана до {len(article)} симв.")
     log(f"Этап 4 ✅ Статья создана: {len(article)} символов")
 
     lines = article.split("\n")
