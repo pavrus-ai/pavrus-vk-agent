@@ -3,8 +3,8 @@ import os, re, json, html, random, sys, io, time, datetime, requests, urllib3
 from PIL import Image
 urllib3.disable_warnings()
 
-VK_TOKEN = os.environ.get("VK_TOKEN", "").strip()            # групповой токен — посты
-VK_USER_TOKEN = os.environ.get("VK_USER_TOKEN", "").strip()  # пользовательский — загрузка фото
+VK_TOKEN = os.environ.get("VK_TOKEN", "").strip()
+VK_USER_TOKEN = os.environ.get("VK_USER_TOKEN", "").strip()
 VK_GROUP_ID = os.environ.get("VK_GROUP_ID", "").strip().lstrip("-")
 TG_BOT = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
 TG_CHAT = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
@@ -16,7 +16,9 @@ SITEMAP = SITE + "/sitemap.xml"
 HISTORY = "history_vk.json"
 API = "https://api.vk.com/method/"
 VK_V = "5.131"
-UA = {"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/126.0 Safari/537.36"}
+UA = {"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/126.0 Safari/537.36",
+      "Accept": "text/html,application/xhtml+xml",
+      "Accept-Language": "ru-RU,ru;q=0.9"}
 BRANDS = ["pavrus", "chartu", "restmoment", "htdz"]
 BL = ["корзин", "кабинет", "избранн", "сравнени", "войти", "заказать звонок",
       "санкт-петербург", "москва", "новосибирск", "8 (800", "info@", "показать еще",
@@ -53,7 +55,7 @@ CATEGORY_SEEDS = [
 def log(msg):
     print(msg, flush=True)
 
-log("Версия ℹ️ pavrus-vk-agent v3 (товар → ВК sblgroup + карточка в TG; отбор по H1, фото не мельче 600px)")
+log("Версия ℹ️ pavrus-vk-agent v4 (диагностика ответов сайта, запасной заголовок из title, вежливые паузы)")
 
 # ============================================================
 # ИИ
@@ -127,6 +129,18 @@ def abs_url(u):
 def get_h1(r):
     m = re.search(r"<h1[^>]*>(.*?)</h1>", r, re.S | re.I)
     return clean(m.group(1)) if m else ""
+
+def get_title_fallback(r):
+    """Запасной заголовок: og:title или <title> (часть до — или |)."""
+    t = ""
+    m = re.search(r'<meta[^>]+property=["\']og:title["\'][^>]+content=["\'](.*?)["\']', r, re.S | re.I)
+    if m:
+        t = clean(m.group(1))
+    if not t:
+        m = re.search(r"<title[^>]*>(.*?)</title>", r, re.S | re.I)
+        t = clean(m.group(1)) if m else ""
+    t = re.split(r"\s*[—|]\s*", t)[0].strip()
+    return t
 
 def get_meta(r, name):
     for pat in (
@@ -218,34 +232,51 @@ def parse_page(r, h1):
     return desc, body, imgs
 
 def pick_page(urls, hist):
-    for attempt in range(25):
+    blocked = 0
+    for attempt in range(15):
         available = [u for u in urls if u not in hist]
         if not available:
             log("ℹ️ История полная — начинаю круг заново")
             available = urls
         page = random.choice(available[:300])
         try:
-            r = requests.get(page, timeout=30, headers=UA).text
+            rs = requests.get(page, timeout=30, headers=UA)
         except Exception:
             log(f"⚠️ Попытка {attempt+1}: не открылось — {page}")
+            time.sleep(2)
             continue
-        h1 = get_h1(r)
+        if rs.status_code != 200:
+            blocked += 1
+            log(f"⚠️ Попытка {attempt+1}: HTTP {rs.status_code} — {page}")
+            time.sleep(2)
+            continue
+        r = rs.text
+        if len(r) < 3000:
+            blocked += 1
+            log(f"⚠️ Попытка {attempt+1}: страница-заглушка ({len(r)} байт) — {page}")
+            time.sleep(2)
+            continue
+
+        h1 = get_h1(r) or get_title_fallback(r)
         if not h1:
-            log(f"⚠️ Попытка {attempt+1}: нет H1 — {page}")
+            log(f"⚠️ Попытка {attempt+1}: нет ни H1, ни title — {page}")
+            time.sleep(1.5)
             continue
         if not any(b in h1.lower() for b in BRANDS):
-            log(f"⚠️ Попытка {attempt+1}: в H1 нет бренда («{h1[:50]}») — {page}")
+            log(f"⚠️ Попытка {attempt+1}: в заголовке нет бренда («{h1[:50]}») — {page}")
+            time.sleep(1.5)
             continue
         desc, body, imgs = parse_page(r, h1)
         if len(body) + len(desc) < 40:
             log(f"⚠️ Попытка {attempt+1}: мало текста — {page}")
+            time.sleep(1.5)
             continue
         log(f"✅ Попытка {attempt+1}: товар «{h1[:70]}» — {page}")
-        return page, h1, desc, body, imgs
-    return None, "", "", "", []
+        return page, h1, desc, body, imgs, blocked
+    return None, "", "", "", [], blocked
 
 # ============================================================
-# ФОТО: только нормальные размеры (никаких логотипов 226x59)
+# ФОТО
 # ============================================================
 
 def choose_image(imgs):
@@ -352,9 +383,13 @@ def main():
     except Exception:
         hist = set()
 
-    page, title, desc, body, imgs = pick_page(urls, hist)
+    page, title, desc, body, imgs, blocked = pick_page(urls, hist)
     if not page:
-        log("❌ Не найден товар с брендом в H1")
+        if blocked >= 8:
+            log("❌ Сайт pavrus.ru блокирует запросы (HTTP-ошибки/заглушки). "
+                "Снижаем частоту: следующий запуск по расписанию.")
+        else:
+            log("❌ Не найден товар с брендом в заголовке")
         sys.exit(1)
 
     hist.add(page)
