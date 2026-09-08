@@ -27,6 +27,8 @@ jobs:
           GROQ_KEY2: ${{ secrets.GROQ_KEY2 }}
           OPENROUTER_KEY: ${{ secrets.OPENROUTER_KEY }}
           OPENROUTER_KEY2: ${{ secrets.OPENROUTER_KEY2 }}
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_DZEN_CHANNEL: ${{ secrets.TELEGRAM_DZEN_CHANNEL }}
           
       - name: Commit and push Dzen files
         run: |
