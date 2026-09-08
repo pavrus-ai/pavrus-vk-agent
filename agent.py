@@ -24,7 +24,7 @@ UA = {"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/1
 BRANDS = ["pavrus", "chartu", "restmoment", "htdz"]
 BL = ["корзин", "кабинет", "избранн", "сравнени", "войти", "заказать звонок",
       "санкт-петербург", "москва", "новосибирск", "8 (800", "info@", "показать еще",
-      "ваш город", "бесплатная доставка", "главная", "обратная связь", "каталог"]
+      "ваш город", "бесплатная доставка", "главная", "обратная связь"]
 
 CATEGORY_SEEDS = [
     "https://pavrus.ru/catalog/pavrus-sistema-golosovaniya/",
@@ -57,7 +57,7 @@ CATEGORY_SEEDS = [
 def log(msg):
     print(msg, flush=True)
 
-log("Версия ℹ️ pavrus-vk-agent v5 (кэш карты сайта на 7 дней, одна проверка живости, фото обязательно)")
+log("Версия ℹ️ pavrus-vk-agent v6 (агрессивный сбор картинок: все атрибуты + background-image, без фильтров по URL)")
 
 # ============================================================
 # ИИ
@@ -158,13 +158,12 @@ def get_meta(r, name):
 # ============================================================
 
 def load_cache():
-    """Возвращает (urls, нужно_обновить)."""
     try:
         d = json.load(open(CACHE, encoding="utf-8"))
         urls, ts = d.get("urls", []), d.get("ts", 0)
         age = (time.time() - ts) / 86400
         if urls and age < CACHE_TTL_DAYS:
-            log(f"ℹ️ Этап 1: сохранённая карта сайта: {len(urls)} ссылок (возраст {age:.1f} дн.) — сайт не трогаем")
+            log(f"ℹ️ Этап 1: сохранённая карта сайта: {len(urls)} ссылок (возраст {age:.1f} дн.)")
             return urls, False
         log(f"ℹ️ Карта устарела ({age:.1f} дн.) — обновим")
     except Exception:
@@ -197,7 +196,7 @@ def fetch_sitemap():
     if not urls:
         raise RuntimeError("пустая карта сайта")
     json.dump({"ts": time.time(), "urls": urls}, open(CACHE, "w", encoding="utf-8"), ensure_ascii=False)
-    log(f"✅ Этап 1: карта обновлена и сохранена в {CACHE}: {len(urls)} ссылок")
+    log(f"✅ Этап 1: карта обновлена: {len(urls)} ссылок")
     return urls
 
 def brand_rank(u):
@@ -222,46 +221,87 @@ def parse_page(r, h1):
             if len(s.strip()) > 30 and "{" not in s
             and not any(b in s.lower() for b in BL)]
     body = " ".join(keep)[:1500]
-    imgs = []
+
+    # АГРЕССИВНЫЙ СБОР КАРТИНОК: все возможные источники
+    imgs = set()
+
+    # 1. og:image
     og = re.search(r'<meta[^>]+property=["\']og:image["\'][^>]+content=["\'](.*?)["\']', r, re.S | re.I)
     if og:
         u = abs_url(og.group(1))
-        if u: imgs.append(u)
+        if u: imgs.add(u)
+
+    # 2. link rel="image_src"
     ls = re.search(r'<link[^>]+rel=["\']image_src["\'][^>]+href=["\'](.*?)["\']', r, re.S | re.I)
     if ls:
         u = abs_url(ls.group(1))
-        if u and u not in imgs: imgs.append(u)
-    for tag in re.findall(r"<img[^>]+>", tail)[:15]:
-        u = ""
+        if u: imgs.add(u)
+
+    # 3. Все img теги: src, data-src, data-lazy-src, data-original, data-lazy, srcset
+    for tag in re.findall(r"<img[^>]+>", tail):
+        for attr in ("data-src", "data-lazy-src", "data-original", "data-lazy", "src"):
+            am = re.search(attr + r'\s*=\s*["\']([^"\']+)["\']', tag, re.I)
+            if am and am.group(1).strip():
+                u = abs_url(am.group(1).split(",")[0].strip().split(" ")[0])
+                if u: imgs.add(u)
+                break
+        # srcset отдельно (берём первый URL)
+        am = re.search(r'srcset\s*=\s*["\']([^"\']+)["\']', tag, re.I)
+        if am:
+            first = am.group(1).split(",")[0].strip().split(" ")[0]
+            u = abs_url(first)
+            if u: imgs.add(u)
+
+    # 4. background-image: url(...) из inline стилей
+    for m in re.finditer(r'background(?:-image)?\s*:\s*url\(["\']?([^"\')\s]+)["\']?\)', tail, re.I):
+        u = abs_url(m.group(1))
+        if u: imgs.add(u)
+
+    # 5. Из полного HTML (не только tail) — товарное фото может быть до скриптов
+    for tag in re.findall(r"<img[^>]+>", r)[:30]:
         for attr in ("data-src", "data-lazy-src", "data-original", "src"):
             am = re.search(attr + r'\s*=\s*["\']([^"\']+)["\']', tag, re.I)
             if am and am.group(1).strip():
-                u = am.group(1)
+                u = abs_url(am.group(1).split(",")[0].strip().split(" ")[0])
+                if u: imgs.add(u)
                 break
-        u = abs_url(u.split(",")[0].strip().split(" ")[0])
-        if u and u not in imgs and not any(x in u.lower() for x in ("logo", "svg", "icon", "banner")):
-            imgs.append(u)
+
+    # Фильтруем только http(s) ссылки
+    imgs = [u for u in imgs if u.startswith("http")]
+    log(f"ℹ️ Найдено кандидатов картинок: {len(imgs)}")
     return desc, body, imgs
+
+# ============================================================
+# ВЫБОР КАРТИНКИ: только проверка размера через PIL, без фильтров по URL
+# ============================================================
 
 def choose_image(imgs):
     best, best_px = None, 0
-    for u in imgs[:10]:
+    checked = 0
+    for u in imgs[:15]:
         try:
-            rs = requests.get(u, timeout=30, headers=UA)
-            if not (10000 < len(rs.content) < 5000000):
+            rs = requests.get(u, timeout=20, headers=UA)
+            if len(rs.content) < 5000:
                 continue
             im = Image.open(io.BytesIO(rs.content))
             w, h = im.size
+            checked += 1
+            # Минимум 400x300 — отсекает логотипы и иконки по размеру
             if w < 400 or h < 300:
                 continue
             if w * h > best_px:
                 best_px, best = w * h, rs.content
         except Exception:
             continue
+    log(f"ℹ️ Проверено картинок: {checked}, лучшая: {best_px} px")
+    if best:
+        log(f"✅ Фото товара: {len(best)} байт")
+    else:
+        log("⚠️ Подходящего фото нет (все меньше 400x300 или не открылись)")
     return best
 
 # ============================================================
-# ВЫБОР СТРАНИЦЫ: одна проверка живости + фото обязательно
+# ВЫБОР СТРАНИЦЫ
 # ============================================================
 
 def pick_page(urls, hist):
@@ -288,7 +328,7 @@ def pick_page(urls, hist):
         r = rs.text
         if len(r) < 3000:
             blocked += 1
-            log(f"⚠️ Попытка {attempt+1}: заглушка ({len(r)} байт) — сайт, похоже, блокирует")
+            log(f"⚠️ Попытка {attempt+1}: заглушка ({len(r)} байт)")
             time.sleep(2)
             continue
 
@@ -303,7 +343,7 @@ def pick_page(urls, hist):
         last_ok = (page, h1, desc, body)
         img = choose_image(imgs)
         if not img:
-            log(f"⚠️ Попытка {attempt+1}: нет подходящего фото — беру следующую страницу")
+            log(f"⚠️ Попытка {attempt+1}: нет фото ≥400x300 — беру следующую страницу")
             continue
         log(f"✅ Попытка {attempt+1}: товар «{h1[:70]}» с фото — {page}")
         return page, h1, desc, body, img, blocked, last_ok
@@ -389,7 +429,7 @@ def main():
         try:
             urls = fetch_sitemap()
         except Exception as e:
-            log(f"❌ Сайт недоступен и сохранённой карты нет: {e} — пропускаю запуск")
+            log(f"❌ Сайт недоступен и кэша нет: {e} — пропускаю запуск")
             sys.exit(0)
     urls.sort(key=brand_rank)
 
@@ -402,12 +442,12 @@ def main():
 
     if not page:
         if blocked >= 5:
-            log("❌ Сайт pavrus.ru не отвечает (блок/недоступен) — останавливаюсь без публикации")
+            log("❌ Сайт блокирует запросы — останавливаюсь")
             sys.exit(0)
         if last_ok:
             page, title, desc, body = last_ok
             img = None
-            log("⚠️ Ни на одной странице нет фото — публикую текстовый пост")
+            log("⚠️ Публикую текстовый пост (фото не найдено ни на одной странице)")
         else:
             log("❌ Не найдено ни одной подходящей страницы")
             sys.exit(1)
