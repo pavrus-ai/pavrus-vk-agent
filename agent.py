@@ -57,7 +57,7 @@ CATEGORY_SEEDS = [
 def log(msg):
     print(msg, flush=True)
 
-log("Версия ℹ️ pavrus-vk-agent v11 (фото ТОЛЬКО через community token → пост на стене, без предложенных)")
+log("Версия ℹ️ pavrus-vk-agent v12 (гибридная загрузка фото для обхода ошибки 27 + фикс TG)")
 
 # ============================================================
 # ИИ
@@ -203,7 +203,7 @@ def brand_rank(u):
     return 0 if any(b in u.lower() for b in BRANDS) else 1
 
 # ============================================================
-# ПАРСИНГ СТРАНИЦЫ (v9: галерея по классу — источник №1)
+# ПАРСИНГ СТРАНИЦЫ
 # ============================================================
 
 def parse_page(r, h1):
@@ -346,7 +346,7 @@ def pick_page(urls, hist):
     return None, "", "", "", None, blocked, last_ok
 
 # ============================================================
-# ВК v11: загрузка фото ТОЛЬКО через community token (VK_TOKEN)
+# ВК v12: Гибридная загрузка фото (обход ошибки 27)
 # ============================================================
 
 def vk_call(method, params, token):
@@ -364,16 +364,18 @@ def vk_call(method, params, token):
     return r.get("response")
 
 def vk_upload(img_bytes):
-    """КЛЮЧЕВОЕ v11: используем ТОЛЬКО community token (VK_TOKEN).
-    Тогда фото принадлежит группе, и wall.post с from_group=1 опубликует пост на стене,
-    а не в предложенных. VK_USER_TOKEN больше не трогаем."""
-    if not VK_TOKEN:
-        log("❌ VK_TOKEN не задан — не могу загрузить фото")
-        return None
-
-    # Только community token. Пробуем оба способа указания группы.
-    for params in ({"owner_id": "-" + VK_GROUP_ID}, {"group_id": VK_GROUP_ID}):
-        srv = vk_call("photos.getWallUploadServer", params, VK_TOKEN)
+    """v12: Для загрузки используем VK_USER_TOKEN (обходит ошибку 27), 
+    но сохраняем фото на стену группы через group_id/owner_id."""
+    tok = VK_USER_TOKEN or VK_TOKEN # Если есть юзер-токен, берём его для загрузки
+    
+    # Пробуем оба формата параметров для совместимости
+    variants = [
+        {"owner_id": "-" + VK_GROUP_ID}, # Работает с VK_USER_TOKEN
+        {"group_id": VK_GROUP_ID}        # Работает с VK_TOKEN (если есть права photos)
+    ]
+    
+    for params in variants:
+        srv = vk_call("photos.getWallUploadServer", params, tok)
         if not srv or "upload_url" not in srv:
             continue
         try:
@@ -383,16 +385,19 @@ def vk_upload(img_bytes):
             continue
         if "photo" not in r:
             continue
+        
         sp = dict(params)
         sp.update({"photo": r["photo"], "server": r.get("server", ""), "hash": r.get("hash", "")})
-        saved = vk_call("photos.saveWallPhoto", sp, VK_TOKEN)
+        saved = vk_call("photos.saveWallPhoto", sp, tok)
+        
         if saved:
             p = saved[0]
-            # Фото должно быть привязано к группе: owner_id = -GROUP_ID
-            if p.get("owner_id") == -int(VK_GROUP_ID):
-                log(f"✅ ВК: фото принадлежит ГРУППЕ → пост пойдёт на стену: photo{p['owner_id']}_{p['id']}")
+            # Проверяем, что фото привязалось к нужной группе
+            if str(p.get("owner_id")).lstrip("-") == VK_GROUP_ID:
+                log(f"✅ ВК: фото успешно загружено и привязано к группе → photo{p['owner_id']}_{p['id']}")
             else:
-                log(f"⚠️ ВК: фото owner_id={p.get('owner_id')} (не группа) — пост может уйти в предложенные")
+                log(f"⚠️ ВК: фото загружено, но owner_id={p.get('owner_id')} (может уйти в предложенные)")
+            
             att = f"photo{p['owner_id']}_{p['id']}"
             if p.get("access_key"):
                 att += f"_{p['access_key']}"
@@ -404,7 +409,7 @@ def vk_post(message, att):
         "owner_id": "-" + VK_GROUP_ID,
         "message": message,
         "from_group": 1,
-        "signed": 0,   # явно: без подписи пользователя
+        "signed": 0,
     }
     if att:
         params["attachments"] = att
@@ -496,7 +501,7 @@ def main():
     tg_post(img, text)
 
     log("=" * 50)
-    log("✅ FINISH: товар → ВК sblgroup (на стену!) + TG @pavrusav → Дзен!")
+    log("✅ FINISH: товар → ВК sblgroup (с фото!) + TG @pavrusav → Дзен!")
     log("=" * 50)
 
 if __name__ == "__main__":
