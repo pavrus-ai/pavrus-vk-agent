@@ -57,7 +57,7 @@ CATEGORY_SEEDS = [
 def log(msg):
     print(msg, flush=True)
 
-log("Версия ℹ️ pavrus-vk-agent v6 (агрессивный сбор картинок: все атрибуты + background-image, без фильтров по URL)")
+log("Версия ℹ️ pavrus-vk-agent v11 (фото ТОЛЬКО через community token → пост на стене, без предложенных)")
 
 # ============================================================
 # ИИ
@@ -203,7 +203,7 @@ def brand_rank(u):
     return 0 if any(b in u.lower() for b in BRANDS) else 1
 
 # ============================================================
-# ПАРСИНГ СТРАНИЦЫ
+# ПАРСИНГ СТРАНИЦЫ (v9: галерея по классу — источник №1)
 # ============================================================
 
 def parse_page(r, h1):
@@ -222,87 +222,83 @@ def parse_page(r, h1):
             and not any(b in s.lower() for b in BL)]
     body = " ".join(keep)[:1500]
 
-    # АГРЕССИВНЫЙ СБОР КАРТИНОК: все возможные источники
-    imgs = set()
+    imgs, seen = [], set()
+    def add(u):
+        if u and u.startswith("http") and u not in seen:
+            seen.add(u)
+            imgs.append(u)
 
-    # 1. og:image
+    gallery_count = 0
+    for tag in re.finditer(r'<(?:a|div|img)[^>]+class="[^"]*catalog-element-gallery-picture[^"]*"[^>]*>', r, re.I):
+        t = tag.group(0)
+        for attr in ("href", "data-src", "src"):
+            am = re.search(attr + r'\s*=\s*["\']([^"\']+)["\']', t, re.I)
+            if am and am.group(1).strip():
+                u = abs_url(am.group(1).split(",")[0].strip().split(" ")[0])
+                if u:
+                    add(u)
+                    gallery_count += 1
+                break
+    log(f"ℹ️ Фото из галереи товара (catalog-element-gallery-picture): {gallery_count}")
+
+    for m in re.finditer(r'["\'](/upload/iblock/[^"\']+\.(?:jpg|jpeg|png|webp))["\']', r, re.I):
+        add(abs_url(m.group(1)))
+    for m in re.finditer(r'["\'](/upload/[^"\']+\.(?:jpg|jpeg|png|webp))["\']', r, re.I):
+        add(abs_url(m.group(1)))
     og = re.search(r'<meta[^>]+property=["\']og:image["\'][^>]+content=["\'](.*?)["\']', r, re.S | re.I)
     if og:
-        u = abs_url(og.group(1))
-        if u: imgs.add(u)
-
-    # 2. link rel="image_src"
+        add(abs_url(og.group(1)))
     ls = re.search(r'<link[^>]+rel=["\']image_src["\'][^>]+href=["\'](.*?)["\']', r, re.S | re.I)
     if ls:
-        u = abs_url(ls.group(1))
-        if u: imgs.add(u)
-
-    # 3. Все img теги: src, data-src, data-lazy-src, data-original, data-lazy, srcset
+        add(abs_url(ls.group(1)))
     for tag in re.findall(r"<img[^>]+>", tail):
         for attr in ("data-src", "data-lazy-src", "data-original", "data-lazy", "src"):
             am = re.search(attr + r'\s*=\s*["\']([^"\']+)["\']', tag, re.I)
             if am and am.group(1).strip():
-                u = abs_url(am.group(1).split(",")[0].strip().split(" ")[0])
-                if u: imgs.add(u)
+                add(abs_url(am.group(1).split(",")[0].strip().split(" ")[0]))
                 break
-        # srcset отдельно (берём первый URL)
         am = re.search(r'srcset\s*=\s*["\']([^"\']+)["\']', tag, re.I)
         if am:
-            first = am.group(1).split(",")[0].strip().split(" ")[0]
-            u = abs_url(first)
-            if u: imgs.add(u)
-
-    # 4. background-image: url(...) из inline стилей
+            add(abs_url(am.group(1).split(",")[0].strip().split(" ")[0]))
     for m in re.finditer(r'background(?:-image)?\s*:\s*url\(["\']?([^"\')\s]+)["\']?\)', tail, re.I):
-        u = abs_url(m.group(1))
-        if u: imgs.add(u)
+        add(abs_url(m.group(1)))
 
-    # 5. Из полного HTML (не только tail) — товарное фото может быть до скриптов
-    for tag in re.findall(r"<img[^>]+>", r)[:30]:
-        for attr in ("data-src", "data-lazy-src", "data-original", "src"):
-            am = re.search(attr + r'\s*=\s*["\']([^"\']+)["\']', tag, re.I)
-            if am and am.group(1).strip():
-                u = abs_url(am.group(1).split(",")[0].strip().split(" ")[0])
-                if u: imgs.add(u)
-                break
-
-    # Фильтруем только http(s) ссылки
-    imgs = [u for u in imgs if u.startswith("http")]
-    log(f"ℹ️ Найдено кандидатов картинок: {len(imgs)}")
+    log(f"ℹ️ Всего кандидатов картинок: {len(imgs)} (первая: {imgs[0][:70] if imgs else '—'})")
     return desc, body, imgs
 
-# ============================================================
-# ВЫБОР КАРТИНКИ: только проверка размера через PIL, без фильтров по URL
-# ============================================================
-
-def choose_image(imgs):
-    best, best_px = None, 0
-    checked = 0
-    for u in imgs[:15]:
+def choose_image(imgs, referer):
+    hdr = dict(UA)
+    hdr["Referer"] = referer
+    hdr["Accept"] = "image/avif,image/webp,image/png,image/*,*/*;q=0.8"
+    best, best_px, checked, err_log = None, 0, 0, 0
+    for u in imgs[:20]:
         try:
-            rs = requests.get(u, timeout=20, headers=UA)
+            rs = requests.get(u, timeout=20, headers=hdr)
+            if rs.status_code != 200:
+                if err_log < 4:
+                    log(f"   ⚠️ img HTTP {rs.status_code}: {u[:90]}")
+                    err_log += 1
+                continue
             if len(rs.content) < 5000:
                 continue
             im = Image.open(io.BytesIO(rs.content))
             w, h = im.size
             checked += 1
-            # Минимум 400x300 — отсекает логотипы и иконки по размеру
             if w < 400 or h < 300:
                 continue
             if w * h > best_px:
                 best_px, best = w * h, rs.content
-        except Exception:
+        except Exception as e:
+            if err_log < 4:
+                log(f"   ⚠️ img ошибка: {u[:90]} ({str(e)[:40]})")
+                err_log += 1
             continue
     log(f"ℹ️ Проверено картинок: {checked}, лучшая: {best_px} px")
     if best:
         log(f"✅ Фото товара: {len(best)} байт")
     else:
-        log("⚠️ Подходящего фото нет (все меньше 400x300 или не открылись)")
+        log("⚠️ Подходящего фото нет")
     return best
-
-# ============================================================
-# ВЫБОР СТРАНИЦЫ
-# ============================================================
 
 def pick_page(urls, hist):
     blocked = 0
@@ -341,7 +337,7 @@ def pick_page(urls, hist):
             log(f"⚠️ Попытка {attempt+1}: мало текста — {page}")
             continue
         last_ok = (page, h1, desc, body)
-        img = choose_image(imgs)
+        img = choose_image(imgs, page)
         if not img:
             log(f"⚠️ Попытка {attempt+1}: нет фото ≥400x300 — беру следующую страницу")
             continue
@@ -350,7 +346,7 @@ def pick_page(urls, hist):
     return None, "", "", "", None, blocked, last_ok
 
 # ============================================================
-# ВК И TG
+# ВК v11: загрузка фото ТОЛЬКО через community token (VK_TOKEN)
 # ============================================================
 
 def vk_call(method, params, token):
@@ -368,9 +364,16 @@ def vk_call(method, params, token):
     return r.get("response")
 
 def vk_upload(img_bytes):
-    tok = VK_USER_TOKEN or VK_TOKEN
+    """КЛЮЧЕВОЕ v11: используем ТОЛЬКО community token (VK_TOKEN).
+    Тогда фото принадлежит группе, и wall.post с from_group=1 опубликует пост на стене,
+    а не в предложенных. VK_USER_TOKEN больше не трогаем."""
+    if not VK_TOKEN:
+        log("❌ VK_TOKEN не задан — не могу загрузить фото")
+        return None
+
+    # Только community token. Пробуем оба способа указания группы.
     for params in ({"owner_id": "-" + VK_GROUP_ID}, {"group_id": VK_GROUP_ID}):
-        srv = vk_call("photos.getWallUploadServer", params, tok)
+        srv = vk_call("photos.getWallUploadServer", params, VK_TOKEN)
         if not srv or "upload_url" not in srv:
             continue
         try:
@@ -382,23 +385,32 @@ def vk_upload(img_bytes):
             continue
         sp = dict(params)
         sp.update({"photo": r["photo"], "server": r.get("server", ""), "hash": r.get("hash", "")})
-        saved = vk_call("photos.saveWallPhoto", sp, tok)
+        saved = vk_call("photos.saveWallPhoto", sp, VK_TOKEN)
         if saved:
             p = saved[0]
+            # Фото должно быть привязано к группе: owner_id = -GROUP_ID
+            if p.get("owner_id") == -int(VK_GROUP_ID):
+                log(f"✅ ВК: фото принадлежит ГРУППЕ → пост пойдёт на стену: photo{p['owner_id']}_{p['id']}")
+            else:
+                log(f"⚠️ ВК: фото owner_id={p.get('owner_id')} (не группа) — пост может уйти в предложенные")
             att = f"photo{p['owner_id']}_{p['id']}"
             if p.get("access_key"):
                 att += f"_{p['access_key']}"
-            log(f"✅ ВК: фото загружено → {att}")
             return att
     return None
 
 def vk_post(message, att):
-    params = {"owner_id": "-" + VK_GROUP_ID, "message": message, "from_group": 1}
+    params = {
+        "owner_id": "-" + VK_GROUP_ID,
+        "message": message,
+        "from_group": 1,
+        "signed": 0,   # явно: без подписи пользователя
+    }
     if att:
         params["attachments"] = att
     res = vk_call("wall.post", params, VK_TOKEN)
     if res:
-        log(f"✅ ВК: пост опубликован: https://vk.com/wall-{VK_GROUP_ID}_{res.get('post_id')}")
+        log(f"✅ ВК: пост на стене: https://vk.com/wall-{VK_GROUP_ID}_{res.get('post_id')}")
         return True
     return False
 
@@ -415,9 +427,9 @@ def tg_post(img_bytes, caption):
         r = requests.post(f"https://api.telegram.org/bot{TG_BOT}/sendMessage",
             data={"chat_id": TG_CHAT, "text": caption}, timeout=60).json()
     if r.get("ok"):
-        log("✅ TG: карточка товара отправлена")
+        log(f"✅ TG: карточка отправлена в {TG_CHAT}")
     else:
-        log(f"⚠️ TG: {str(r)[:150]}")
+        log(f"⚠️ TG: {str(r)[:200]}")
 
 # ============================================================
 # ГЛАВНАЯ ЛОГИКА
@@ -470,7 +482,7 @@ def main():
     )
     text = ai_call(prompt, 400)
     if not text:
-        text = f"{title}\n\n{desc or body[:600]}\n\nПодробнее: {page}"
+        text = f"{title}\n\n{desc or body[:900]}\n\nПодробнее: {page}"
     text = text.replace("**", "").replace("##", "").strip()
     if len(text) > 1500:
         text = text[:1500].rsplit(" ", 1)[0].rstrip() + f"\n\nПодробнее: {page}"
@@ -484,7 +496,7 @@ def main():
     tg_post(img, text)
 
     log("=" * 50)
-    log("✅ FINISH: товар → ВК sblgroup (+ TG карточка)!")
+    log("✅ FINISH: товар → ВК sblgroup (на стену!) + TG @pavrusav → Дзен!")
     log("=" * 50)
 
 if __name__ == "__main__":
