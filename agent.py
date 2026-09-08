@@ -14,6 +14,8 @@ OR_KEY = os.environ.get("OPENROUTER_KEY", "").strip()
 SITE = "https://pavrus.ru"
 SITEMAP = SITE + "/sitemap.xml"
 HISTORY = "history_vk.json"
+CACHE = "sitemap_cache.json"
+CACHE_TTL_DAYS = 7
 API = "https://api.vk.com/method/"
 VK_V = "5.131"
 UA = {"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/126.0 Safari/537.36",
@@ -55,7 +57,7 @@ CATEGORY_SEEDS = [
 def log(msg):
     print(msg, flush=True)
 
-log("Версия ℹ️ pavrus-vk-agent v4 (диагностика ответов сайта, запасной заголовок из title, вежливые паузы)")
+log("Версия ℹ️ pavrus-vk-agent v5 (кэш карты сайта на 7 дней, одна проверка живости, фото обязательно)")
 
 # ============================================================
 # ИИ
@@ -131,7 +133,6 @@ def get_h1(r):
     return clean(m.group(1)) if m else ""
 
 def get_title_fallback(r):
-    """Запасной заголовок: og:title или <title> (часть до — или |)."""
     t = ""
     m = re.search(r'<meta[^>]+property=["\']og:title["\'][^>]+content=["\'](.*?)["\']', r, re.S | re.I)
     if m:
@@ -139,8 +140,7 @@ def get_title_fallback(r):
     if not t:
         m = re.search(r"<title[^>]*>(.*?)</title>", r, re.S | re.I)
         t = clean(m.group(1)) if m else ""
-    t = re.split(r"\s*[—|]\s*", t)[0].strip()
-    return t
+    return re.split(r"\s*[—|]\s*", t)[0].strip()
 
 def get_meta(r, name):
     for pat in (
@@ -153,38 +153,36 @@ def get_meta(r, name):
             if v: return v
     return ""
 
-def get_og_image(r):
-    for pat in (
-        r'<meta[^>]+property=["\']og:image["\'][^>]+content=["\'](.*?)["\']',
-        r'<meta[^>]+content=["\'](.*?)["\'][^>]+property=["\']og:image["\']',
-    ):
-        m = re.search(pat, r, re.S | re.I)
-        if m:
-            u = abs_url(m.group(1))
-            if u: return u
-    return ""
-
 # ============================================================
-# СБОР И ВЫБОР СТРАНИЦЫ
+# КЭШ КАРТЫ САЙТА
 # ============================================================
 
-def collect_urls():
-    urls = []
+def load_cache():
+    """Возвращает (urls, нужно_обновить)."""
     try:
-        log("Этап 1: карта сайта...")
-        xml = requests.get(SITEMAP, timeout=30, headers=UA).text
-        locs = re.findall(r"<loc>\s*(.*?)\s*</loc>", xml)
-        smps = [l for l in locs if "sitemap" in l.lower()] or [SITEMAP]
-        for sm in smps:
-            try:
-                x = requests.get(sm, timeout=30, headers=UA).text
-            except Exception:
-                continue
-            urls += [u for u in re.findall(r"<loc>\s*(.*?)\s*</loc>", x) if "/catalog/" in u]
-    except Exception as e:
-        log(f"⚠️ sitemap: {e}")
+        d = json.load(open(CACHE, encoding="utf-8"))
+        urls, ts = d.get("urls", []), d.get("ts", 0)
+        age = (time.time() - ts) / 86400
+        if urls and age < CACHE_TTL_DAYS:
+            log(f"ℹ️ Этап 1: сохранённая карта сайта: {len(urls)} ссылок (возраст {age:.1f} дн.) — сайт не трогаем")
+            return urls, False
+        log(f"ℹ️ Карта устарела ({age:.1f} дн.) — обновим")
+    except Exception:
+        log("ℹ️ Кэша карты нет — создадим")
+    return [], True
+
+def fetch_sitemap():
+    urls = []
+    xml = requests.get(SITEMAP, timeout=30, headers=UA).text
+    locs = re.findall(r"<loc>\s*(.*?)\s*</loc>", xml)
+    smps = [l for l in locs if "sitemap" in l.lower()] or [SITEMAP]
+    for sm in smps:
+        try:
+            x = requests.get(sm, timeout=30, headers=UA).text
+        except Exception:
+            continue
+        urls += [u for u in re.findall(r"<loc>\s*(.*?)\s*</loc>", x) if "/catalog/" in u]
     urls = sorted(set(urls))
-    log(f"ℹ️ Ссылок /catalog/: {len(urls)}")
     if len(urls) < 10:
         for s in CATEGORY_SEEDS:
             try:
@@ -196,10 +194,18 @@ def collect_urls():
                 if u and u not in urls:
                     urls.append(u)
         urls = sorted(set(urls))
-    def brand_rank(u):
-        return 0 if any(b in u.lower() for b in BRANDS) else 1
-    urls.sort(key=brand_rank)
+    if not urls:
+        raise RuntimeError("пустая карта сайта")
+    json.dump({"ts": time.time(), "urls": urls}, open(CACHE, "w", encoding="utf-8"), ensure_ascii=False)
+    log(f"✅ Этап 1: карта обновлена и сохранена в {CACHE}: {len(urls)} ссылок")
     return urls
+
+def brand_rank(u):
+    return 0 if any(b in u.lower() for b in BRANDS) else 1
+
+# ============================================================
+# ПАРСИНГ СТРАНИЦЫ
+# ============================================================
 
 def parse_page(r, h1):
     desc = get_meta(r, "description") or get_meta(r, "og:description")
@@ -217,8 +223,14 @@ def parse_page(r, h1):
             and not any(b in s.lower() for b in BL)]
     body = " ".join(keep)[:1500]
     imgs = []
-    og = get_og_image(r)
-    if og: imgs.append(og)
+    og = re.search(r'<meta[^>]+property=["\']og:image["\'][^>]+content=["\'](.*?)["\']', r, re.S | re.I)
+    if og:
+        u = abs_url(og.group(1))
+        if u: imgs.append(u)
+    ls = re.search(r'<link[^>]+rel=["\']image_src["\'][^>]+href=["\'](.*?)["\']', r, re.S | re.I)
+    if ls:
+        u = abs_url(ls.group(1))
+        if u and u not in imgs: imgs.append(u)
     for tag in re.findall(r"<img[^>]+>", tail)[:15]:
         u = ""
         for attr in ("data-src", "data-lazy-src", "data-original", "src"):
@@ -231,18 +243,41 @@ def parse_page(r, h1):
             imgs.append(u)
     return desc, body, imgs
 
+def choose_image(imgs):
+    best, best_px = None, 0
+    for u in imgs[:10]:
+        try:
+            rs = requests.get(u, timeout=30, headers=UA)
+            if not (10000 < len(rs.content) < 5000000):
+                continue
+            im = Image.open(io.BytesIO(rs.content))
+            w, h = im.size
+            if w < 400 or h < 300:
+                continue
+            if w * h > best_px:
+                best_px, best = w * h, rs.content
+        except Exception:
+            continue
+    return best
+
+# ============================================================
+# ВЫБОР СТРАНИЦЫ: одна проверка живости + фото обязательно
+# ============================================================
+
 def pick_page(urls, hist):
     blocked = 0
-    for attempt in range(15):
+    last_ok = None
+    for attempt in range(10):
         available = [u for u in urls if u not in hist]
         if not available:
             log("ℹ️ История полная — начинаю круг заново")
             available = urls
-        page = random.choice(available[:300])
+        page = random.choice([u for u in available if brand_rank(u) == 0][:300] or available[:300])
         try:
             rs = requests.get(page, timeout=30, headers=UA)
         except Exception:
-            log(f"⚠️ Попытка {attempt+1}: не открылось — {page}")
+            blocked += 1
+            log(f"⚠️ Попытка {attempt+1}: сайт не ответил — {page}")
             time.sleep(2)
             continue
         if rs.status_code != 200:
@@ -253,54 +288,26 @@ def pick_page(urls, hist):
         r = rs.text
         if len(r) < 3000:
             blocked += 1
-            log(f"⚠️ Попытка {attempt+1}: страница-заглушка ({len(r)} байт) — {page}")
+            log(f"⚠️ Попытка {attempt+1}: заглушка ({len(r)} байт) — сайт, похоже, блокирует")
             time.sleep(2)
             continue
 
         h1 = get_h1(r) or get_title_fallback(r)
-        if not h1:
-            log(f"⚠️ Попытка {attempt+1}: нет ни H1, ни title — {page}")
-            time.sleep(1.5)
-            continue
-        if not any(b in h1.lower() for b in BRANDS):
+        if not h1 or not any(b in h1.lower() for b in BRANDS):
             log(f"⚠️ Попытка {attempt+1}: в заголовке нет бренда («{h1[:50]}») — {page}")
-            time.sleep(1.5)
             continue
         desc, body, imgs = parse_page(r, h1)
         if len(body) + len(desc) < 40:
             log(f"⚠️ Попытка {attempt+1}: мало текста — {page}")
-            time.sleep(1.5)
             continue
-        log(f"✅ Попытка {attempt+1}: товар «{h1[:70]}» — {page}")
-        return page, h1, desc, body, imgs, blocked
-    return None, "", "", "", [], blocked
-
-# ============================================================
-# ФОТО
-# ============================================================
-
-def choose_image(imgs):
-    best, best_px = None, 0
-    for u in imgs[:8]:
-        try:
-            rs = requests.get(u, timeout=30, headers=UA)
-            if not rs.headers.get("content-type", "").startswith("image"):
-                continue
-            if not (20000 < len(rs.content) < 5000000):
-                continue
-            im = Image.open(io.BytesIO(rs.content))
-            w, h = im.size
-            if w < 600 or h < 400:
-                continue
-            if w * h > best_px:
-                best_px, best = w * h, rs.content
-        except Exception:
+        last_ok = (page, h1, desc, body)
+        img = choose_image(imgs)
+        if not img:
+            log(f"⚠️ Попытка {attempt+1}: нет подходящего фото — беру следующую страницу")
             continue
-    if best:
-        log(f"✅ Фото товара: {len(best)} байт")
-    else:
-        log("⚠️ Подходящего фото нет — пост без картинки")
-    return best
+        log(f"✅ Попытка {attempt+1}: товар «{h1[:70]}» с фото — {page}")
+        return page, h1, desc, body, img, blocked, last_ok
+    return None, "", "", "", None, blocked, last_ok
 
 # ============================================================
 # ВК И TG
@@ -377,20 +384,33 @@ def tg_post(img_bytes, caption):
 # ============================================================
 
 def main():
-    urls = collect_urls()
+    urls, need_fetch = load_cache()
+    if need_fetch:
+        try:
+            urls = fetch_sitemap()
+        except Exception as e:
+            log(f"❌ Сайт недоступен и сохранённой карты нет: {e} — пропускаю запуск")
+            sys.exit(0)
+    urls.sort(key=brand_rank)
+
     try:
         hist = set(json.load(open(HISTORY, encoding="utf-8"))) if os.path.exists(HISTORY) else set()
     except Exception:
         hist = set()
 
-    page, title, desc, body, imgs, blocked = pick_page(urls, hist)
+    page, title, desc, body, img, blocked, last_ok = pick_page(urls, hist)
+
     if not page:
-        if blocked >= 8:
-            log("❌ Сайт pavrus.ru блокирует запросы (HTTP-ошибки/заглушки). "
-                "Снижаем частоту: следующий запуск по расписанию.")
+        if blocked >= 5:
+            log("❌ Сайт pavrus.ru не отвечает (блок/недоступен) — останавливаюсь без публикации")
+            sys.exit(0)
+        if last_ok:
+            page, title, desc, body = last_ok
+            img = None
+            log("⚠️ Ни на одной странице нет фото — публикую текстовый пост")
         else:
-            log("❌ Не найден товар с брендом в заголовке")
-        sys.exit(1)
+            log("❌ Не найдено ни одной подходящей страницы")
+            sys.exit(1)
 
     hist.add(page)
     json.dump(sorted(hist), open(HISTORY, "w", encoding="utf-8"), ensure_ascii=False)
@@ -416,7 +436,6 @@ def main():
         text = text[:1500].rsplit(" ", 1)[0].rstrip() + f"\n\nПодробнее: {page}"
     log(f"📝 Текст поста: {len(text)} симв.")
 
-    img = choose_image(imgs)
     att = vk_upload(img) if img else None
     ok = vk_post(text, att)
     if not ok:
