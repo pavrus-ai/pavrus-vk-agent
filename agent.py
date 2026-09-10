@@ -14,7 +14,7 @@ OR_KEY = os.environ.get("OPENROUTER_KEY", "").strip()
 OR_KEY2 = os.environ.get("OPENROUTER_KEY2", "").strip()
 CEREBRAS_KEY = os.environ.get("CEREBRAS_KEY", "").strip()
 MISTRAL_KEY = os.environ.get("MISTRAL_KEY", "").strip()
-GH_AI_TOKEN = os.environ.get("GITHUB_TOKEN", "").strip()   # встроен в Actions, секрет не нужен
+GH_AI_TOKEN = os.environ.get("GITHUB_TOKEN", "").strip()
 
 SITE = "https://pavrus.ru"
 SITEMAP = SITE + "/sitemap.xml"
@@ -63,10 +63,10 @@ CATEGORY_SEEDS = [
 def log(msg):
     print(msg, flush=True)
 
-log("Версия ℹ️ pavrus-vk-agent v17 (8 ступеней ИИ: github → cerebras → mistral → groq×2 → openrouter×2; повторы ВК при ошибке 9)")
+log("Версия ℹ️ pavrus-vk-agent v18 (честный лог пропусков ИИ + 2 эндпоинта GitHub Models + 3 варианта загрузки ВК с длинными паузами)")
 
 # ============================================================
-# ИИ: 8 ступеней, начиная с GitHub Models
+# ИИ
 # ============================================================
 
 def _extract(r):
@@ -77,14 +77,22 @@ RU_SUFFIX = "\n\nВАЖНО: Пиши ТОЛЬКО на русском язык�
 
 def ai_github(prompt):
     if not GH_AI_TOKEN: return None
-    try:
-        r = requests.post("https://models.inference.ai.azure.com/chat/completions",
-            headers={"Authorization": f"Bearer {GH_AI_TOKEN}"},
-            json={"model": "gpt-4o-mini", "temperature": 0.8,
-                  "messages": [{"role": "user", "content": prompt + RU_SUFFIX}]}, timeout=60).json()
-        if "error" in r: return None
-        return _extract(r)
-    except Exception: return None
+    endpoints = ["https://models.github.ai/inference/chat/completions",
+                 "https://models.inference.ai.azure.com/chat/completions"]
+    models = ["openai/gpt-4o-mini", "gpt-4o-mini"]
+    for ep in endpoints:
+        for mdl in models:
+            try:
+                r = requests.post(ep,
+                    headers={"Authorization": f"Bearer {GH_AI_TOKEN}"},
+                    json={"model": mdl, "temperature": 0.8,
+                          "messages": [{"role": "user", "content": prompt + RU_SUFFIX}]}, timeout=60).json()
+                if "error" in r: continue
+                res = _extract(r)
+                if res: return res
+            except Exception:
+                continue
+    return None
 
 def ai_cerebras(prompt):
     if not CEREBRAS_KEY: return None
@@ -131,25 +139,34 @@ def ai_openrouter(prompt, model, key):
     except Exception: return None
 
 def ai_call(prompt, minlen=400):
-    # 1) GitHub Models — ключ не нужен
-    log("🔄 Попытка: github-models (gpt-4o-mini)...")
-    res = ai_github(prompt)
-    if res and len(res) >= minlen:
-        log(f"✅ Успех: github-models, {len(res)} симв.")
-        return res
+    # 1) GitHub Models
+    if not GH_AI_TOKEN:
+        log("⚠️ github-models: GITHUB_TOKEN не передан! Добавьте в agent.yml: GITHUB_TOKEN: ${{ github.token }}")
+    else:
+        log("🔄 Попытка: github-models (gpt-4o-mini)...")
+        res = ai_github(prompt)
+        if res and len(res) >= minlen:
+            log(f"✅ Успех: github-models, {len(res)} симв.")
+            return res
     # 2) Cerebras
-    log("🔄 Попытка: cerebras (llama-3.3-70b)...")
-    res = ai_cerebras(prompt)
-    if res and len(res) >= minlen:
-        log(f"✅ Успех: cerebras, {len(res)} симв.")
-        return res
+    if not CEREBRAS_KEY:
+        log("⚠️ cerebras: CEREBRAS_KEY не передан в env!")
+    else:
+        log("🔄 Попытка: cerebras (llama-3.3-70b)...")
+        res = ai_cerebras(prompt)
+        if res and len(res) >= minlen:
+            log(f"✅ Успех: cerebras, {len(res)} симв.")
+            return res
     # 3) Mistral
-    log("🔄 Попытка: mistral (mistral-small)...")
-    res = ai_mistral(prompt)
-    if res and len(res) >= minlen:
-        log(f"✅ Успех: mistral, {len(res)} симв.")
-        return res
-    # 4) Groq (оба ключа)
+    if not MISTRAL_KEY:
+        log("⚠️ mistral: MISTRAL_KEY не передан в env!")
+    else:
+        log("🔄 Попытка: mistral (mistral-small)...")
+        res = ai_mistral(prompt)
+        if res and len(res) >= minlen:
+            log(f"✅ Успех: mistral, {len(res)} симв.")
+            return res
+    # 4) Groq ×2
     for i, key in enumerate((GROQ_KEY, GROQ_KEY2)):
         if not key: continue
         log(f"🔄 Попытка: groq (llama-3.3-70b-versatile, ключ {i+1})...")
@@ -157,7 +174,7 @@ def ai_call(prompt, minlen=400):
         if res and len(res) >= minlen:
             log(f"✅ Успех: groq (ключ {i+1}), {len(res)} симв.")
             return res
-    # 5) OpenRouter (4 модели × 2 ключа)
+    # 5) OpenRouter ×4 ×2
     or_models = ["meta-llama/llama-3.3-70b-instruct:free",
                  "google/gemma-3-27b-it:free",
                  "deepseek/deepseek-chat-v3-0324:free",
@@ -378,7 +395,7 @@ def parse_text(r):
     return h1, desc, body
 
 # ============================================================
-# ВК (повторы при ошибке 9) И TG
+# ВК v18: 3 варианта токенов + длинные паузы против флуд-контроля
 # ============================================================
 
 def vk_call(method, params, token):
@@ -396,13 +413,17 @@ def vk_call(method, params, token):
     return r.get("response")
 
 def vk_upload(img_bytes):
-    tok = VK_USER_TOKEN or VK_TOKEN
-    pauses = (20, 60)
-    for attempt in range(3):
-        for params in ({"owner_id": "-" + VK_GROUP_ID}, {"group_id": VK_GROUP_ID}):
+    variants = []
+    if VK_USER_TOKEN:
+        variants += [(VK_USER_TOKEN, {"owner_id": "-" + VK_GROUP_ID}),
+                     (VK_USER_TOKEN, {"group_id": VK_GROUP_ID})]
+    if VK_TOKEN:
+        variants += [(VK_TOKEN, {"group_id": VK_GROUP_ID})]
+    pauses = (30, 90)
+    for rnd in range(3):
+        for tok, params in variants:
             srv = vk_call("photos.getWallUploadServer", params, tok)
             if not srv or "upload_url" not in srv:
-                time.sleep(3)
                 continue
             try:
                 r = requests.post(srv["upload_url"],
@@ -410,7 +431,7 @@ def vk_upload(img_bytes):
             except Exception:
                 continue
             if not r.get("photo"):
-                log(f"⚠️ VK upload вернул пустое photo (попытка {attempt+1})")
+                log(f"⚠️ VK upload вернул пустое photo (раунд {rnd+1})")
                 continue
             sp = dict(params)
             sp.update({"photo": r["photo"], "server": r.get("server", ""), "hash": r.get("hash", "")})
@@ -422,9 +443,9 @@ def vk_upload(img_bytes):
                     att += f"_{p['access_key']}"
                 log(f"✅ ВК: фото загружено → {att}")
                 return att
-        if attempt < 2:
-            log(f"⏳ ВК: флуд-контроль, пауза {pauses[attempt]} сек (попытка {attempt+1}/3)")
-            time.sleep(pauses[attempt])
+        if rnd < 2:
+            log(f"⏳ ВК: флуд-контроль, пауза {pauses[rnd]} сек (раунд {rnd+1}/3)")
+            time.sleep(pauses[rnd])
     return None
 
 def vk_post(message, att):
@@ -553,7 +574,7 @@ def main():
     if not text:
         base = body[:900] or desc
         text = f"{title}\n\n{base}\n\nПодробнее: {page}"
-        log("⚠️ Все 8 ступеней ИИ недоступны — фолбэк из текста страницы")
+        log("⚠️ Все ступени ИИ недоступны — фолбэк из текста страницы")
     text = text.replace("**", "").replace("##", "").strip()
     if len(text) > 1500:
         text = text[:1500].rsplit(" ", 1)[0].rstrip() + f"\n\nПодробнее: {page}"
