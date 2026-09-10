@@ -12,6 +12,9 @@ GROQ_KEY = os.environ.get("GROQ_KEY", "").strip()
 GROQ_KEY2 = os.environ.get("GROQ_KEY2", "").strip()
 OR_KEY = os.environ.get("OPENROUTER_KEY", "").strip()
 OR_KEY2 = os.environ.get("OPENROUTER_KEY2", "").strip()
+CEREBRAS_KEY = os.environ.get("CEREBRAS_KEY", "").strip()
+MISTRAL_KEY = os.environ.get("MISTRAL_KEY", "").strip()
+GH_AI_TOKEN = os.environ.get("GITHUB_TOKEN", "").strip()   # встроен в Actions, секрет не нужен
 
 SITE = "https://pavrus.ru"
 SITEMAP = SITE + "/sitemap.xml"
@@ -60,15 +63,50 @@ CATEGORY_SEEDS = [
 def log(msg):
     print(msg, flush=True)
 
-log("Версия ℹ️ pavrus-vk-agent v16 (повторы ВК при ошибке 9 + ключи KEY2 + умный фолбэк-текст)")
+log("Версия ℹ️ pavrus-vk-agent v17 (8 ступеней ИИ: github → cerebras → mistral → groq×2 → openrouter×2; повторы ВК при ошибке 9)")
 
 # ============================================================
-# ИИ (v16: поддержка KEY2 как дополнительных ключей)
+# ИИ: 8 ступеней, начиная с GitHub Models
 # ============================================================
 
 def _extract(r):
     try: return r["choices"][0]["message"]["content"].strip()
     except (KeyError, IndexError, TypeError): return None
+
+RU_SUFFIX = "\n\nВАЖНО: Пиши ТОЛЬКО на русском языке."
+
+def ai_github(prompt):
+    if not GH_AI_TOKEN: return None
+    try:
+        r = requests.post("https://models.inference.ai.azure.com/chat/completions",
+            headers={"Authorization": f"Bearer {GH_AI_TOKEN}"},
+            json={"model": "gpt-4o-mini", "temperature": 0.8,
+                  "messages": [{"role": "user", "content": prompt + RU_SUFFIX}]}, timeout=60).json()
+        if "error" in r: return None
+        return _extract(r)
+    except Exception: return None
+
+def ai_cerebras(prompt):
+    if not CEREBRAS_KEY: return None
+    try:
+        r = requests.post("https://api.cerebras.ai/v1/chat/completions",
+            headers={"Authorization": f"Bearer {CEREBRAS_KEY}"},
+            json={"model": "llama-3.3-70b", "temperature": 0.8,
+                  "messages": [{"role": "user", "content": prompt + RU_SUFFIX}]}, timeout=60).json()
+        if "error" in r: return None
+        return _extract(r)
+    except Exception: return None
+
+def ai_mistral(prompt):
+    if not MISTRAL_KEY: return None
+    try:
+        r = requests.post("https://api.mistral.ai/v1/chat/completions",
+            headers={"Authorization": f"Bearer {MISTRAL_KEY}"},
+            json={"model": "mistral-small-latest", "temperature": 0.8,
+                  "messages": [{"role": "user", "content": prompt + RU_SUFFIX}]}, timeout=60).json()
+        if "error" in r: return None
+        return _extract(r)
+    except Exception: return None
 
 def ai_groq(prompt, key):
     if not key: return None
@@ -76,8 +114,7 @@ def ai_groq(prompt, key):
         r = requests.post("https://api.groq.com/openai/v1/chat/completions",
             headers={"Authorization": f"Bearer {key}"},
             json={"model": "llama-3.3-70b-versatile", "temperature": 0.8,
-                  "messages": [{"role": "user", "content": prompt + "\n\nВАЖНО: Пиши ТОЛЬКО на русском языке."}]},
-            timeout=60).json()
+                  "messages": [{"role": "user", "content": prompt + RU_SUFFIX}]}, timeout=60).json()
         if "error" in r: return None
         return _extract(r)
     except Exception: return None
@@ -88,31 +125,50 @@ def ai_openrouter(prompt, model, key):
         r = requests.post("https://openrouter.ai/api/v1/chat/completions",
             headers={"Authorization": f"Bearer {key}", "HTTP-Referer": "https://github.com"},
             json={"model": model, "temperature": 0.8, "max_tokens": 2000,
-                  "messages": [{"role": "user", "content": prompt + "\n\nВАЖНО: Пиши ТОЛЬКО на русском языке."}]},
-            timeout=60).json()
+                  "messages": [{"role": "user", "content": prompt + RU_SUFFIX}]}, timeout=60).json()
         if "error" in r: return None
         return _extract(r)
     except Exception: return None
 
 def ai_call(prompt, minlen=400):
-    groq_keys = [k for k in (GROQ_KEY, GROQ_KEY2) if k]
-    or_keys = [k for k in (OR_KEY, OR_KEY2) if k]
+    # 1) GitHub Models — ключ не нужен
+    log("🔄 Попытка: github-models (gpt-4o-mini)...")
+    res = ai_github(prompt)
+    if res and len(res) >= minlen:
+        log(f"✅ Успех: github-models, {len(res)} симв.")
+        return res
+    # 2) Cerebras
+    log("🔄 Попытка: cerebras (llama-3.3-70b)...")
+    res = ai_cerebras(prompt)
+    if res and len(res) >= minlen:
+        log(f"✅ Успех: cerebras, {len(res)} симв.")
+        return res
+    # 3) Mistral
+    log("🔄 Попытка: mistral (mistral-small)...")
+    res = ai_mistral(prompt)
+    if res and len(res) >= minlen:
+        log(f"✅ Успех: mistral, {len(res)} симв.")
+        return res
+    # 4) Groq (оба ключа)
+    for i, key in enumerate((GROQ_KEY, GROQ_KEY2)):
+        if not key: continue
+        log(f"🔄 Попытка: groq (llama-3.3-70b-versatile, ключ {i+1})...")
+        res = ai_groq(prompt, key)
+        if res and len(res) >= minlen:
+            log(f"✅ Успех: groq (ключ {i+1}), {len(res)} симв.")
+            return res
+    # 5) OpenRouter (4 модели × 2 ключа)
     or_models = ["meta-llama/llama-3.3-70b-instruct:free",
                  "google/gemma-3-27b-it:free",
                  "deepseek/deepseek-chat-v3-0324:free",
                  "auto"]
-    for key in groq_keys:
-        log("🔄 Попытка: groq (llama-3.3-70b-versatile)...")
-        res = ai_groq(prompt, key)
-        if res and len(res) >= minlen:
-            log(f"✅ Успех: groq, {len(res)} симв.")
-            return res
-    for key in or_keys:
+    for i, key in enumerate((OR_KEY, OR_KEY2)):
+        if not key: continue
         for model in or_models:
-            log(f"🔄 Попытка: openrouter ({model})...")
+            log(f"🔄 Попытка: openrouter ({model}, ключ {i+1})...")
             res = ai_openrouter(prompt, model, key)
             if res and len(res) >= minlen:
-                log(f"✅ Успех: openrouter ({model}), {len(res)} симв.")
+                log(f"✅ Успех: openrouter ({model}, ключ {i+1}), {len(res)} симв.")
                 return res
     return None
 
@@ -322,7 +378,7 @@ def parse_text(r):
     return h1, desc, body
 
 # ============================================================
-# ВК (v16: повторы при ошибке 9 «Контроль потока») И TG
+# ВК (повторы при ошибке 9) И TG
 # ============================================================
 
 def vk_call(method, params, token):
@@ -341,6 +397,7 @@ def vk_call(method, params, token):
 
 def vk_upload(img_bytes):
     tok = VK_USER_TOKEN or VK_TOKEN
+    pauses = (20, 60)
     for attempt in range(3):
         for params in ({"owner_id": "-" + VK_GROUP_ID}, {"group_id": VK_GROUP_ID}):
             srv = vk_call("photos.getWallUploadServer", params, tok)
@@ -365,8 +422,9 @@ def vk_upload(img_bytes):
                     att += f"_{p['access_key']}"
                 log(f"✅ ВК: фото загружено → {att}")
                 return att
-        log(f" ВК: пауза 5 сек перед повтором загрузки (попытка {attempt+1}/3)")
-        time.sleep(5)
+        if attempt < 2:
+            log(f"⏳ ВК: флуд-контроль, пауза {pauses[attempt]} сек (попытка {attempt+1}/3)")
+            time.sleep(pauses[attempt])
     return None
 
 def vk_post(message, att):
@@ -493,10 +551,9 @@ def main():
     )
     text = ai_call(prompt, 400)
     if not text:
-        # v16: умный фолбэк — абзацы тела страницы, а не сырое мета-описание
         base = body[:900] or desc
         text = f"{title}\n\n{base}\n\nПодробнее: {page}"
-        log("⚠️ ИИ недоступен — фолбэк из текста страницы (обновите ключи GROQ/OPENROUTER!)")
+        log("⚠️ Все 8 ступеней ИИ недоступны — фолбэк из текста страницы")
     text = text.replace("**", "").replace("##", "").strip()
     if len(text) > 1500:
         text = text[:1500].rsplit(" ", 1)[0].rstrip() + f"\n\nПодробнее: {page}"
