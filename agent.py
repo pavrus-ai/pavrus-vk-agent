@@ -9,7 +9,9 @@ VK_GROUP_ID = os.environ.get("VK_GROUP_ID", "").strip().lstrip("-")
 TG_BOT = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
 TG_CHAT = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
 GROQ_KEY = os.environ.get("GROQ_KEY", "").strip()
+GROQ_KEY2 = os.environ.get("GROQ_KEY2", "").strip()
 OR_KEY = os.environ.get("OPENROUTER_KEY", "").strip()
+OR_KEY2 = os.environ.get("OPENROUTER_KEY2", "").strip()
 
 SITE = "https://pavrus.ru"
 SITEMAP = SITE + "/sitemap.xml"
@@ -18,10 +20,11 @@ CACHE = "sitemap_cache.json"
 CACHE_TTL_DAYS = 7
 API = "https://api.vk.com/method/"
 VK_V = "5.131"
+POLLINATIONS_API = "https://image.pollinations.ai/prompt/"
 UA = {"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/126.0 Safari/537.36",
       "Accept": "text/html,application/xhtml+xml",
       "Accept-Language": "ru-RU,ru;q=0.9"}
-BRANDS = ["pavrus", "chartu", "restmoment", "htdz"]
+BRAND_SLUGS = ["pavrus", "htdz", "ht-dz", "chartu", "restmoment", "rest-moment"]
 BL = ["корзин", "кабинет", "избранн", "сравнени", "войти", "заказать звонок",
       "санкт-петербург", "москва", "новосибирск", "8 (800", "info@", "показать еще",
       "ваш город", "бесплатная доставка", "главная", "обратная связь"]
@@ -57,21 +60,21 @@ CATEGORY_SEEDS = [
 def log(msg):
     print(msg, flush=True)
 
-log("Версия ℹ️ pavrus-vk-agent v12 (гибридная загрузка фото для обхода ошибки 27 + фикс TG)")
+log("Версия ℹ️ pavrus-vk-agent v16 (повторы ВК при ошибке 9 + ключи KEY2 + умный фолбэк-текст)")
 
 # ============================================================
-# ИИ
+# ИИ (v16: поддержка KEY2 как дополнительных ключей)
 # ============================================================
 
 def _extract(r):
     try: return r["choices"][0]["message"]["content"].strip()
     except (KeyError, IndexError, TypeError): return None
 
-def ai_groq(prompt):
-    if not GROQ_KEY: return None
+def ai_groq(prompt, key):
+    if not key: return None
     try:
         r = requests.post("https://api.groq.com/openai/v1/chat/completions",
-            headers={"Authorization": f"Bearer {GROQ_KEY}"},
+            headers={"Authorization": f"Bearer {key}"},
             json={"model": "llama-3.3-70b-versatile", "temperature": 0.8,
                   "messages": [{"role": "user", "content": prompt + "\n\nВАЖНО: Пиши ТОЛЬКО на русском языке."}]},
             timeout=60).json()
@@ -79,11 +82,11 @@ def ai_groq(prompt):
         return _extract(r)
     except Exception: return None
 
-def ai_openrouter(prompt, model):
-    if not OR_KEY: return None
+def ai_openrouter(prompt, model, key):
+    if not key: return None
     try:
         r = requests.post("https://openrouter.ai/api/v1/chat/completions",
-            headers={"Authorization": f"Bearer {OR_KEY}", "HTTP-Referer": "https://github.com"},
+            headers={"Authorization": f"Bearer {key}", "HTTP-Referer": "https://github.com"},
             json={"model": model, "temperature": 0.8, "max_tokens": 2000,
                   "messages": [{"role": "user", "content": prompt + "\n\nВАЖНО: Пиши ТОЛЬКО на русском языке."}]},
             timeout=60).json()
@@ -92,22 +95,25 @@ def ai_openrouter(prompt, model):
     except Exception: return None
 
 def ai_call(prompt, minlen=400):
-    models = [
-        ("groq", "llama-3.3-70b-versatile"),
-        ("openrouter", "meta-llama/llama-3.3-70b-instruct:free"),
-        ("openrouter", "google/gemma-3-27b-it:free"),
-        ("openrouter", "deepseek/deepseek-chat-v3-0324:free"),
-        ("openrouter", "auto")
-    ]
-    for provider, model in models:
-        try:
-            log(f"🔄 Попытка: {provider} ({model})...")
-            res = ai_groq(prompt) if provider == "groq" else ai_openrouter(prompt, model)
+    groq_keys = [k for k in (GROQ_KEY, GROQ_KEY2) if k]
+    or_keys = [k for k in (OR_KEY, OR_KEY2) if k]
+    or_models = ["meta-llama/llama-3.3-70b-instruct:free",
+                 "google/gemma-3-27b-it:free",
+                 "deepseek/deepseek-chat-v3-0324:free",
+                 "auto"]
+    for key in groq_keys:
+        log("🔄 Попытка: groq (llama-3.3-70b-versatile)...")
+        res = ai_groq(prompt, key)
+        if res and len(res) >= minlen:
+            log(f"✅ Успех: groq, {len(res)} симв.")
+            return res
+    for key in or_keys:
+        for model in or_models:
+            log(f"🔄 Попытка: openrouter ({model})...")
+            res = ai_openrouter(prompt, model, key)
             if res and len(res) >= minlen:
-                log(f"✅ Успех: {provider} ({model}), {len(res)} симв.")
+                log(f"✅ Успех: openrouter ({model}), {len(res)} симв.")
                 return res
-        except Exception:
-            pass
     return None
 
 # ============================================================
@@ -128,30 +134,26 @@ def abs_url(u):
     if u.startswith("http"): return u
     return ""
 
-def get_h1(r):
-    m = re.search(r"<h1[^>]*>(.*?)</h1>", r, re.S | re.I)
-    return clean(m.group(1)) if m else ""
+def brand_in_url(u):
+    path = u.split("//", 1)[-1].split("/", 1)[-1].lower()
+    return any(b in path for b in BRAND_SLUGS)
 
-def get_title_fallback(r):
-    t = ""
-    m = re.search(r'<meta[^>]+property=["\']og:title["\'][^>]+content=["\'](.*?)["\']', r, re.S | re.I)
-    if m:
-        t = clean(m.group(1))
-    if not t:
-        m = re.search(r"<title[^>]*>(.*?)</title>", r, re.S | re.I)
-        t = clean(m.group(1)) if m else ""
-    return re.split(r"\s*[—|]\s*", t)[0].strip()
-
-def get_meta(r, name):
-    for pat in (
-        r'<meta[^>]+name=["\']' + name + r'["\'][^>]+content=["\'](.*?)["\']',
-        r'<meta[^>]+content=["\'](.*?)["\'][^>]+name=["\']' + name + r'["\']',
-    ):
-        m = re.search(pat, r, re.S | re.I)
-        if m:
-            v = clean(m.group(1))
-            if v: return v
-    return ""
+def ensure_size(img_bytes, min_w=1000):
+    try:
+        im = Image.open(io.BytesIO(img_bytes))
+        w, h = im.size
+        if w >= min_w:
+            log(f"ℹ️ Размер фото {w}x{h} — увеличение не нужно")
+            return img_bytes
+        new_w, new_h = min_w, int(h * min_w / w)
+        im = im.convert("RGB").resize((new_w, new_h), Image.LANCZOS)
+        buf = io.BytesIO()
+        im.save(buf, "JPEG", quality=88)
+        log(f"🔍 Фото увеличено с {w}x{h} до {new_w}x{new_h} (для обложки Дзена)")
+        return buf.getvalue()
+    except Exception as e:
+        log(f"⚠️ ensure_size: {e}")
+        return img_bytes
 
 # ============================================================
 # КЭШ КАРТЫ САЙТА
@@ -199,15 +201,111 @@ def fetch_sitemap():
     log(f"✅ Этап 1: карта обновлена: {len(urls)} ссылок")
     return urls
 
-def brand_rank(u):
-    return 0 if any(b in u.lower() for b in BRANDS) else 1
-
 # ============================================================
-# ПАРСИНГ СТРАНИЦЫ
+# ГАЛЕРЕЯ И ТЕКСТ СТРАНИЦЫ
 # ============================================================
 
-def parse_page(r, h1):
-    desc = get_meta(r, "description") or get_meta(r, "og:description")
+def parse_gallery(r):
+    out, seen = [], set()
+    for m in re.finditer(r'<(?:a|div|img)[^>]+class="[^"]*catalog-element-gallery-picture[^"]*"[^>]*>', r, re.I):
+        t = m.group(0)
+        for attr in ("href", "data-src", "src"):
+            am = re.search(attr + r'\s*=\s*["\']([^"\']+)["\']', t, re.I)
+            if am and am.group(1).strip():
+                u = abs_url(am.group(1).split(",")[0].strip().split(" ")[0])
+                if u and u not in seen:
+                    seen.add(u)
+                    out.append(u)
+                break
+    log(f"ℹ️ Фото из галереи товара (catalog-element-gallery-picture): {len(out)}")
+    return out
+
+def parse_other_imgs(r):
+    out = []
+    og = re.search(r'<meta[^>]+property=["\']og:image["\'][^>]+content=["\'](.*?)["\']', r, re.S | re.I)
+    if og:
+        u = abs_url(og.group(1))
+        if u: out.append(u)
+    for tag in re.findall(r"<img[^>]+>", r)[:20]:
+        for attr in ("data-src", "data-lazy-src", "data-original", "src"):
+            am = re.search(attr + r'\s*=\s*["\']([^"\']+)["\']', tag, re.I)
+            if am and am.group(1).strip():
+                u = abs_url(am.group(1).split(",")[0].strip().split(" ")[0])
+                if u and u not in out:
+                    out.append(u)
+                break
+    return out
+
+def choose_image(imgs, referer):
+    hdr = dict(UA)
+    hdr["Referer"] = referer
+    hdr["Accept"] = "image/avif,image/webp,image/png,image/*,*/*;q=0.8"
+    best, best_px, checked, err_log = None, 0, 0, 0
+    for u in imgs[:15]:
+        if "resize_cache" in u:
+            continue
+        try:
+            rs = requests.get(u, timeout=20, headers=hdr)
+            if rs.status_code == 404:
+                if err_log < 3:
+                    log(f"   ⚠️ img 404 (нет картинки): {u[:80]}")
+                    err_log += 1
+                continue
+            if rs.status_code != 200:
+                if err_log < 3:
+                    log(f"   ⚠️ img HTTP {rs.status_code}: {u[:80]}")
+                    err_log += 1
+                continue
+            if len(rs.content) < 5000:
+                continue
+            im = Image.open(io.BytesIO(rs.content))
+            w, h = im.size
+            checked += 1
+            if w < 400 or h < 300:
+                continue
+            if w * h > best_px:
+                best_px, best = w * h, rs.content
+        except Exception as e:
+            if err_log < 3:
+                log(f"   ⚠️ img ошибка: {u[:80]} ({str(e)[:40]})")
+                err_log += 1
+            continue
+    log(f"ℹ️ Проверено картинок: {checked}, лучшая: {best_px} px")
+    if best:
+        log(f"✅ Фото товара доступно: {len(best)} байт")
+    return best
+
+def generate_product_image(title, desc):
+    scene = (f"Professional conference hall with modern AV equipment: {title}. "
+             f"{desc[:150]} Bright clean interior, warm daylight, photorealistic, "
+             f"sharp focus, high resolution, no text, no logos, no people close-up")
+    seed = int(time.time()) % 1000000
+    url = (POLLINATIONS_API + requests.utils.quote(scene) +
+           f"?nologo=true&seed={seed}&model=flux&width=1280&height=960")
+    try:
+        r = requests.get(url, timeout=240)
+        r.raise_for_status()
+        log(f"✅ Сгенерирована картинка промптом: {len(r.content)} байт")
+        return r.content
+    except Exception as e:
+        log(f"⚠️ Ошибка генерации картинки: {e}")
+        return None
+
+def parse_text(r):
+    h1 = ""
+    m = re.search(r"<h1[^>]*>(.*?)</h1>", r, re.S | re.I)
+    if m: h1 = clean(m.group(1))
+    if not h1:
+        m = re.search(r"<title[^>]*>(.*?)</title>", r, re.S | re.I)
+        h1 = clean(m.group(1)) if m else ""
+        h1 = re.split(r"\s*[—|]\s*", h1)[0].strip()
+    desc = ""
+    for pat in (r'<meta[^>]+name=["\']description["\'][^>]+content=["\'](.*?)["\']',
+                r'<meta[^>]+content=["\'](.*?)["\'][^>]+name=["\']description["\']'):
+        dm = re.search(pat, r, re.S | re.I)
+        if dm:
+            desc = clean(dm.group(1))
+            if desc: break
     tail = re.sub(r"<script[^>]*>.*?</script>", " ", r, flags=re.S | re.I)
     tail = re.sub(r"<style[^>]*>.*?</style>", " ", tail, flags=re.S | re.I)
     for mk in ["Назад к списку", "Нужна консультация", "Подробная информация"]:
@@ -221,132 +319,10 @@ def parse_page(r, h1):
             if len(s.strip()) > 30 and "{" not in s
             and not any(b in s.lower() for b in BL)]
     body = " ".join(keep)[:1500]
-
-    imgs, seen = [], set()
-    def add(u):
-        if u and u.startswith("http") and u not in seen:
-            seen.add(u)
-            imgs.append(u)
-
-    gallery_count = 0
-    for tag in re.finditer(r'<(?:a|div|img)[^>]+class="[^"]*catalog-element-gallery-picture[^"]*"[^>]*>', r, re.I):
-        t = tag.group(0)
-        for attr in ("href", "data-src", "src"):
-            am = re.search(attr + r'\s*=\s*["\']([^"\']+)["\']', t, re.I)
-            if am and am.group(1).strip():
-                u = abs_url(am.group(1).split(",")[0].strip().split(" ")[0])
-                if u:
-                    add(u)
-                    gallery_count += 1
-                break
-    log(f"ℹ️ Фото из галереи товара (catalog-element-gallery-picture): {gallery_count}")
-
-    for m in re.finditer(r'["\'](/upload/iblock/[^"\']+\.(?:jpg|jpeg|png|webp))["\']', r, re.I):
-        add(abs_url(m.group(1)))
-    for m in re.finditer(r'["\'](/upload/[^"\']+\.(?:jpg|jpeg|png|webp))["\']', r, re.I):
-        add(abs_url(m.group(1)))
-    og = re.search(r'<meta[^>]+property=["\']og:image["\'][^>]+content=["\'](.*?)["\']', r, re.S | re.I)
-    if og:
-        add(abs_url(og.group(1)))
-    ls = re.search(r'<link[^>]+rel=["\']image_src["\'][^>]+href=["\'](.*?)["\']', r, re.S | re.I)
-    if ls:
-        add(abs_url(ls.group(1)))
-    for tag in re.findall(r"<img[^>]+>", tail):
-        for attr in ("data-src", "data-lazy-src", "data-original", "data-lazy", "src"):
-            am = re.search(attr + r'\s*=\s*["\']([^"\']+)["\']', tag, re.I)
-            if am and am.group(1).strip():
-                add(abs_url(am.group(1).split(",")[0].strip().split(" ")[0]))
-                break
-        am = re.search(r'srcset\s*=\s*["\']([^"\']+)["\']', tag, re.I)
-        if am:
-            add(abs_url(am.group(1).split(",")[0].strip().split(" ")[0]))
-    for m in re.finditer(r'background(?:-image)?\s*:\s*url\(["\']?([^"\')\s]+)["\']?\)', tail, re.I):
-        add(abs_url(m.group(1)))
-
-    log(f"ℹ️ Всего кандидатов картинок: {len(imgs)} (первая: {imgs[0][:70] if imgs else '—'})")
-    return desc, body, imgs
-
-def choose_image(imgs, referer):
-    hdr = dict(UA)
-    hdr["Referer"] = referer
-    hdr["Accept"] = "image/avif,image/webp,image/png,image/*,*/*;q=0.8"
-    best, best_px, checked, err_log = None, 0, 0, 0
-    for u in imgs[:20]:
-        try:
-            rs = requests.get(u, timeout=20, headers=hdr)
-            if rs.status_code != 200:
-                if err_log < 4:
-                    log(f"   ⚠️ img HTTP {rs.status_code}: {u[:90]}")
-                    err_log += 1
-                continue
-            if len(rs.content) < 5000:
-                continue
-            im = Image.open(io.BytesIO(rs.content))
-            w, h = im.size
-            checked += 1
-            if w < 400 or h < 300:
-                continue
-            if w * h > best_px:
-                best_px, best = w * h, rs.content
-        except Exception as e:
-            if err_log < 4:
-                log(f"   ⚠️ img ошибка: {u[:90]} ({str(e)[:40]})")
-                err_log += 1
-            continue
-    log(f"ℹ️ Проверено картинок: {checked}, лучшая: {best_px} px")
-    if best:
-        log(f"✅ Фото товара: {len(best)} байт")
-    else:
-        log("⚠️ Подходящего фото нет")
-    return best
-
-def pick_page(urls, hist):
-    blocked = 0
-    last_ok = None
-    for attempt in range(10):
-        available = [u for u in urls if u not in hist]
-        if not available:
-            log("ℹ️ История полная — начинаю круг заново")
-            available = urls
-        page = random.choice([u for u in available if brand_rank(u) == 0][:300] or available[:300])
-        try:
-            rs = requests.get(page, timeout=30, headers=UA)
-        except Exception:
-            blocked += 1
-            log(f"⚠️ Попытка {attempt+1}: сайт не ответил — {page}")
-            time.sleep(2)
-            continue
-        if rs.status_code != 200:
-            blocked += 1
-            log(f"⚠️ Попытка {attempt+1}: HTTP {rs.status_code} — {page}")
-            time.sleep(2)
-            continue
-        r = rs.text
-        if len(r) < 3000:
-            blocked += 1
-            log(f"⚠️ Попытка {attempt+1}: заглушка ({len(r)} байт)")
-            time.sleep(2)
-            continue
-
-        h1 = get_h1(r) or get_title_fallback(r)
-        if not h1 or not any(b in h1.lower() for b in BRANDS):
-            log(f"⚠️ Попытка {attempt+1}: в заголовке нет бренда («{h1[:50]}») — {page}")
-            continue
-        desc, body, imgs = parse_page(r, h1)
-        if len(body) + len(desc) < 40:
-            log(f"⚠️ Попытка {attempt+1}: мало текста — {page}")
-            continue
-        last_ok = (page, h1, desc, body)
-        img = choose_image(imgs, page)
-        if not img:
-            log(f"⚠️ Попытка {attempt+1}: нет фото ≥400x300 — беру следующую страницу")
-            continue
-        log(f"✅ Попытка {attempt+1}: товар «{h1[:70]}» с фото — {page}")
-        return page, h1, desc, body, img, blocked, last_ok
-    return None, "", "", "", None, blocked, last_ok
+    return h1, desc, body
 
 # ============================================================
-# ВК v12: Гибридная загрузка фото (обход ошибки 27)
+# ВК (v16: повторы при ошибке 9 «Контроль потока») И TG
 # ============================================================
 
 def vk_call(method, params, token):
@@ -364,53 +340,37 @@ def vk_call(method, params, token):
     return r.get("response")
 
 def vk_upload(img_bytes):
-    """v12: Для загрузки используем VK_USER_TOKEN (обходит ошибку 27), 
-    но сохраняем фото на стену группы через group_id/owner_id."""
-    tok = VK_USER_TOKEN or VK_TOKEN # Если есть юзер-токен, берём его для загрузки
-    
-    # Пробуем оба формата параметров для совместимости
-    variants = [
-        {"owner_id": "-" + VK_GROUP_ID}, # Работает с VK_USER_TOKEN
-        {"group_id": VK_GROUP_ID}        # Работает с VK_TOKEN (если есть права photos)
-    ]
-    
-    for params in variants:
-        srv = vk_call("photos.getWallUploadServer", params, tok)
-        if not srv or "upload_url" not in srv:
-            continue
-        try:
-            r = requests.post(srv["upload_url"],
-                files={"photo": ("product.jpg", img_bytes, "image/jpeg")}, timeout=120).json()
-        except Exception:
-            continue
-        if "photo" not in r:
-            continue
-        
-        sp = dict(params)
-        sp.update({"photo": r["photo"], "server": r.get("server", ""), "hash": r.get("hash", "")})
-        saved = vk_call("photos.saveWallPhoto", sp, tok)
-        
-        if saved:
-            p = saved[0]
-            # Проверяем, что фото привязалось к нужной группе
-            if str(p.get("owner_id")).lstrip("-") == VK_GROUP_ID:
-                log(f"✅ ВК: фото успешно загружено и привязано к группе → photo{p['owner_id']}_{p['id']}")
-            else:
-                log(f"⚠️ ВК: фото загружено, но owner_id={p.get('owner_id')} (может уйти в предложенные)")
-            
-            att = f"photo{p['owner_id']}_{p['id']}"
-            if p.get("access_key"):
-                att += f"_{p['access_key']}"
-            return att
+    tok = VK_USER_TOKEN or VK_TOKEN
+    for attempt in range(3):
+        for params in ({"owner_id": "-" + VK_GROUP_ID}, {"group_id": VK_GROUP_ID}):
+            srv = vk_call("photos.getWallUploadServer", params, tok)
+            if not srv or "upload_url" not in srv:
+                time.sleep(3)
+                continue
+            try:
+                r = requests.post(srv["upload_url"],
+                    files={"photo": ("product.jpg", img_bytes, "image/jpeg")}, timeout=120).json()
+            except Exception:
+                continue
+            if not r.get("photo"):
+                log(f"⚠️ VK upload вернул пустое photo (попытка {attempt+1})")
+                continue
+            sp = dict(params)
+            sp.update({"photo": r["photo"], "server": r.get("server", ""), "hash": r.get("hash", "")})
+            saved = vk_call("photos.saveWallPhoto", sp, tok)
+            if saved:
+                p = saved[0]
+                att = f"photo{p['owner_id']}_{p['id']}"
+                if p.get("access_key"):
+                    att += f"_{p['access_key']}"
+                log(f"✅ ВК: фото загружено → {att}")
+                return att
+        log(f" ВК: пауза 5 сек перед повтором загрузки (попытка {attempt+1}/3)")
+        time.sleep(5)
     return None
 
 def vk_post(message, att):
-    params = {
-        "owner_id": "-" + VK_GROUP_ID,
-        "message": message,
-        "from_group": 1,
-        "signed": 0,
-    }
+    params = {"owner_id": "-" + VK_GROUP_ID, "message": message, "from_group": 1, "signed": 0}
     if att:
         params["attachments"] = att
     res = vk_call("wall.post", params, VK_TOKEN)
@@ -448,25 +408,71 @@ def main():
         except Exception as e:
             log(f"❌ Сайт недоступен и кэша нет: {e} — пропускаю запуск")
             sys.exit(0)
-    urls.sort(key=brand_rank)
+
+    cand = [u for u in urls if brand_in_url(u)]
+    log(f"ℹ️ Этап 2: URL с брендом в адресе: {len(cand)} из {len(urls)}")
+    if not cand:
+        log("❌ Нет URL с брендами в адресе")
+        sys.exit(1)
 
     try:
         hist = set(json.load(open(HISTORY, encoding="utf-8"))) if os.path.exists(HISTORY) else set()
     except Exception:
         hist = set()
+    avail = [u for u in cand if u not in hist] or cand
+    random.shuffle(avail)
 
-    page, title, desc, body, img, blocked, last_ok = pick_page(urls, hist)
+    page = title = desc = body = None
+    img = None
+    last_ok = None
+    site_down = False
+
+    for i, u in enumerate(avail[:12]):
+        try:
+            rs = requests.get(u, timeout=30, headers=UA)
+        except Exception as e:
+            log(f"❌ Сайт недоступен (сеть): {u} — {str(e)[:60]}")
+            site_down = True
+            break
+        if rs.status_code == 404:
+            log(f"⚠️ Попытка {i+1}: 404 — страница удалена, выбираю другую: {u}")
+            continue
+        if rs.status_code != 200 or len(rs.text) < 3000:
+            log(f"⚠️ Попытка {i+1}: HTTP {rs.status_code} или заглушка — {u}")
+            continue
+        r = rs.text
+
+        title, desc, body = parse_text(r)
+        if not title or (len(body) + len(desc)) < 40:
+            log(f"⚠️ Попытка {i+1}: мало текста — {u}")
+            continue
+        last_ok = (u, title, desc, body)
+
+        imgs = parse_gallery(r) or parse_other_imgs(r)
+        img = choose_image(imgs, u) if imgs else None
+        if not img:
+            log("⚠️ Картинка товара недоступна (404/мелкая) — генерирую промптом")
+            img = generate_product_image(title, desc)
+        if not img:
+            log(f"⚠️ Попытка {i+1}: не удалось получить картинку — {u}")
+            continue
+
+        img = ensure_size(img, 1000)
+        page = u
+        log(f"✅ Попытка {i+1}: товар «{title[:70]}» с картинкой — {page}")
+        break
+
+    if site_down:
+        log("❌ Сайт pavrus.ru недоступен — агент останавливается без публикации")
+        sys.exit(0)
 
     if not page:
-        if blocked >= 5:
-            log("❌ Сайт блокирует запросы — останавливаюсь")
-            sys.exit(0)
         if last_ok:
             page, title, desc, body = last_ok
             img = None
-            log("⚠️ Публикую текстовый пост (фото не найдено ни на одной странице)")
+            log("⚠️ Публикую текстовый пост (картинку получить не удалось)")
         else:
-            log("❌ Не найдено ни одной подходящей страницы")
+            log("❌ Не найдена подходящая страница")
             sys.exit(1)
 
     hist.add(page)
@@ -487,13 +493,18 @@ def main():
     )
     text = ai_call(prompt, 400)
     if not text:
-        text = f"{title}\n\n{desc or body[:900]}\n\nПодробнее: {page}"
+        # v16: умный фолбэк — абзацы тела страницы, а не сырое мета-описание
+        base = body[:900] or desc
+        text = f"{title}\n\n{base}\n\nПодробнее: {page}"
+        log("⚠️ ИИ недоступен — фолбэк из текста страницы (обновите ключи GROQ/OPENROUTER!)")
     text = text.replace("**", "").replace("##", "").strip()
     if len(text) > 1500:
         text = text[:1500].rsplit(" ", 1)[0].rstrip() + f"\n\nПодробнее: {page}"
     log(f"📝 Текст поста: {len(text)} симв.")
 
     att = vk_upload(img) if img else None
+    if not att and img:
+        log("⚠️ ВК: пост уйдёт без фото")
     ok = vk_post(text, att)
     if not ok:
         log("❌ ВК: пост не опубликован")
@@ -501,7 +512,7 @@ def main():
     tg_post(img, text)
 
     log("=" * 50)
-    log("✅ FINISH: товар → ВК sblgroup (с фото!) + TG @pavrusav → Дзен!")
+    log("✅ FINISH: товар → ВК sblgroup + TG → Дзен (обложка ≥700px)!")
     log("=" * 50)
 
 if __name__ == "__main__":
