@@ -1,7 +1,7 @@
 name: VK Agent
 on:
   schedule:
-    - cron: "0 8 * * *"
+    - cron: "20 9 * * *"
   workflow_dispatch:
 permissions:
   contents: write
@@ -22,6 +22,9 @@ jobs:
           VK_GROUP_ID: ${{ secrets.VK_GROUP_ID }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          GITHUB_TOKEN: ${{ github.token }}
+          CEREBRAS_KEY: ${{ secrets.CEREBRAS_KEY }}
+          MISTRAL_KEY: ${{ secrets.MISTRAL_KEY }}
           GROQ_KEY: ${{ secrets.GROQ_KEY }}
           GROQ_KEY2: ${{ secrets.GROQ_KEY2 }}
           OPENROUTER_KEY: ${{ secrets.OPENROUTER_KEY }}
