@@ -411,18 +411,14 @@ def vk_call(method, params, token):
         log(f"⚠️ VK {method}: {str(r.get('error'))[:150]}")
         return None
     return r.get("response")
-
 def vk_upload(img_bytes):
-    variants = []
-    if VK_USER_TOKEN:
-        variants += [(VK_USER_TOKEN, {"owner_id": "-" + VK_GROUP_ID}),
-                     (VK_USER_TOKEN, {"group_id": VK_GROUP_ID})]
-    if VK_TOKEN:
-        variants += [(VK_TOKEN, {"group_id": VK_GROUP_ID})]
+    if not VK_USER_TOKEN:
+        log("⚠️ ВК: нет VK_USER_TOKEN — пост без фото")
+        return None
     pauses = (30, 90)
     for rnd in range(3):
-        for tok, params in variants:
-            srv = vk_call("photos.getWallUploadServer", params, tok)
+        for params in ({"owner_id": "-" + VK_GROUP_ID}, {"group_id": VK_GROUP_ID}):
+            srv = vk_call("photos.getWallUploadServer", params, VK_USER_TOKEN)
             if not srv or "upload_url" not in srv:
                 continue
             try:
@@ -435,7 +431,7 @@ def vk_upload(img_bytes):
                 continue
             sp = dict(params)
             sp.update({"photo": r["photo"], "server": r.get("server", ""), "hash": r.get("hash", "")})
-            saved = vk_call("photos.saveWallPhoto", sp, tok)
+            saved = vk_call("photos.saveWallPhoto", sp, VK_USER_TOKEN)
             if saved:
                 p = saved[0]
                 att = f"photo{p['owner_id']}_{p['id']}"
