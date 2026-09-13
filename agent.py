@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-import os, re, json, html, random, sys, io, time, datetime, requests, urllib3
+import os, re, json, html, random, sys, io, time, datetime, base64, requests, urllib3
 from PIL import Image
 urllib3.disable_warnings()
 
@@ -15,7 +15,8 @@ OR_KEY2 = os.environ.get("OPENROUTER_KEY2", "").strip()
 CEREBRAS_KEY = os.environ.get("CEREBRAS_KEY", "").strip()
 MISTRAL_KEY = os.environ.get("MISTRAL_KEY", "").strip()
 GH_AI_TOKEN = os.environ.get("GITHUB_TOKEN", "").strip()
-POLLINATIONS_TOKEN = os.environ.get("POLLINATIONS_TOKEN", "").strip()
+OPENAI_KEY = os.environ.get("OPENAI_KEY", "").strip()
+HF_TOKEN = os.environ.get("HF_TOKEN", "").strip()
 
 SITE = "https://pavrus.ru"
 SITEMAP = SITE + "/sitemap.xml"
@@ -65,10 +66,10 @@ CATEGORY_SEEDS = [
 def log(msg):
     print(msg, flush=True)
 
-log("Версия ℹ️ pavrus-vk-agent v24 (удаление водяного знака pollinations: токен или обрезка нижней полосы)")
+log("Версия ℹ️ pavrus-vk-agent v26 (картинки: OpenAI DALL-E 3 → HF FLUX → pollinations+обрезка; альбом; 8 ступеней ИИ)")
 
 # ============================================================
-# ИИ: 8 ступеней
+# ИИ-ТЕКСТ: 8 ступеней
 # ============================================================
 
 def _extract(r):
@@ -226,7 +227,7 @@ def ensure_size(img_bytes, min_w=1000):
         return img_bytes
 
 def strip_watermark(img_bytes):
-    """v24: срезаем нижнюю полосу кадра (9%) — там pollinations.ai ставит логотип."""
+    """Только для pollinations: срезаем нижнюю полосу 9% с логотипом."""
     try:
         im = Image.open(io.BytesIO(img_bytes))
         w, h = im.size
@@ -360,24 +361,68 @@ def choose_image(imgs, referer):
         log(f"✅ Фото товара доступно: {len(best)} байт")
     return best
 
+# ============================================================
+# ГЕНЕРАЦИЯ КАРТИНОК v26: OpenAI DALL-E 3 → HF FLUX → pollinations
+# ============================================================
+
+def openai_image(prompt):
+    """DALL-E 3: высокое качество, без водяных знаков."""
+    if not OPENAI_KEY:
+        return None
+    full = prompt + ", photorealistic, high resolution, no text, no logos, no watermark"
+    try:
+        r = requests.post("https://api.openai.com/v1/images/generations",
+            headers={"Authorization": f"Bearer {OPENAI_KEY}",
+                     "Content-Type": "application/json"},
+            json={"model": "dall-e-3", "prompt": full, "n": 1,
+                  "size": "1024x1024", "quality": "standard",
+                  "response_format": "b64_json"}, timeout=120).json()
+        if "error" in r:
+            log(f"⚠️ OpenAI DALL-E 3: {str(r['error'])[:120]}")
+            return None
+        data = base64.b64decode(r["data"][0]["b64_json"])
+        log(f"✅ OpenAI DALL-E 3: картинка {len(data)} байт (без водяного знака)")
+        return data
+    except Exception as e:
+        log(f"⚠️ OpenAI ошибка: {e}")
+        return None
+
+def hf_image(prompt):
+    """Hugging Face FLUX: бесплатно, без водяных знаков."""
+    if not HF_TOKEN:
+        return None
+    full = prompt + ", photorealistic, high resolution, no text, no logos, no watermark"
+    for mdl in ("black-forest-labs/FLUX.1-schnell", "black-forest-labs/FLUX.1-dev"):
+        try:
+            r = requests.post(f"https://api-inference.huggingface.co/models/{mdl}",
+                headers={"Authorization": f"Bearer {HF_TOKEN}"},
+                json={"inputs": full}, timeout=120)
+            if r.status_code == 200 and r.headers.get("Content-Type", "").startswith("image/"):
+                log(f"✅ HF {mdl}: картинка {len(r.content)} байт (без водяного знака)")
+                return r.content
+            log(f"⚠️ HF {mdl}: ответ {r.status_code}: {r.text[:80]}")
+        except Exception as e:
+            log(f"⚠️ HF {mdl} ошибка: {e}")
+    return None
+
 def generate_product_image(title, desc):
-    """v24: с токеном pollinations — без водяного знака; без токена — знак срежется."""
     scene = (f"Professional conference hall with modern AV equipment: {title}. "
-             f"{desc[:150]} Bright clean interior, warm daylight, photorealistic, "
-             f"sharp focus, high resolution, no text, no logos, no people close-up")
+             f"{desc[:150]} Bright clean interior, warm daylight, sharp focus")
+    g = openai_image(scene)
+    if g:
+        return g
+    g = hf_image(scene)
+    if g:
+        return g
     seed = int(time.time()) % 1000000
-    url = (POLLINATIONS_API + requests.utils.quote(scene) +
+    url = (POLLINATIONS_API + requests.utils.quote(scene +
+           ", bright vivid colors, photorealistic, no people close-up") +
            f"?nologo=true&seed={seed}&model=flux&width=1280&height=960")
-    if POLLINATIONS_TOKEN:
-        url += f"&token={POLLINATIONS_TOKEN}"
     try:
         r = requests.get(url, timeout=240)
         r.raise_for_status()
-        log(f"✅ Сгенерирована картинка промптом: {len(r.content)} байт" +
-            (" (с токеном, без знака)" if POLLINATIONS_TOKEN else " (без токена — срежу знак)"))
-        if not POLLINATIONS_TOKEN:
-            return strip_watermark(r.content)
-        return r.content
+        log(f"✅ Сгенерирована картинка промптом (pollinations): {len(r.content)} байт")
+        return strip_watermark(r.content)
     except Exception as e:
         log(f"⚠️ Ошибка генерации картинки: {e}")
         return None
@@ -401,8 +446,8 @@ def parse_text(r):
     tail = re.sub(r"<style[^>]*>.*?</style>", " ", tail, flags=re.S | re.I)
     for mk in ["Назад к списку", "Нужна консультация", "Подробная информация"]:
         i = tail.find(mk)
-            if i != -1:
-                tail = tail[:i]
+        if i != -1:
+            tail = tail[:i]
     chunks = re.findall(r"<p[^>]*>(.*?)</p>", tail, re.S | re.I)
     chunks += re.findall(r'<div[^>]+class=["\'][^"\']*(?:descr|text|content|detail|char)[^"\']*["\'][^>]*>(.*?)</div>', tail, re.S | re.I)
     raw = " ".join(clean(c) for c in chunks)
@@ -413,7 +458,7 @@ def parse_text(r):
     return h1, desc, body
 
 # ============================================================
-# ВК v23: минимум вызовов фото-методов
+# ВК: путь 1 (wall server) → путь 2 (альбом группы)
 # ============================================================
 
 def vk_call(method, params, token):
@@ -443,60 +488,62 @@ def vk_get_album_id():
     return None
 
 def vk_upload_via_album(img_bytes):
-    if not VK_USER_TOKEN:
-        return None
     album = vk_get_album_id()
     if not album:
         log("ℹ️ ВК: путь 2 пропущен (нет VK_ALBUM_ID / vk_album.json)")
         return None
-    srv = vk_call("photos.getUploadServer",
-                  {"group_id": VK_GROUP_ID, "album_id": album}, VK_USER_TOKEN)
-    if not srv or "upload_url" not in srv:
-        return None
-    try:
-        r = requests.post(srv["upload_url"],
-            files={"file1": ("product.jpg", img_bytes, "image/jpeg")}, timeout=120).json()
-    except Exception:
-        return None
-    if not r.get("hash") or not r.get("photos_list"):
-        log(f"⚠️ ВК upload в альбом: пустой ответ: {str(r)[:120]}")
-        return None
-    saved = vk_call("photos.savePhotos",
-                    {"group_id": VK_GROUP_ID, "album_id": album,
-                     "server": r.get("server", ""), "photos_list": r.get("photos_list", ""),
-                     "hash": r.get("hash", "")}, VK_USER_TOKEN)
-    if saved:
-        p = saved[0]
-        att = f"photo{p['owner_id']}_{p['id']}"
-        if p.get("access_key"):
-            att += f"_{p['access_key']}"
-        return att
+    for tok in (VK_USER_TOKEN, VK_TOKEN):
+        if not tok:
+            continue
+        srv = vk_call("photos.getUploadServer",
+                      {"group_id": VK_GROUP_ID, "album_id": album}, tok)
+        if not srv or "upload_url" not in srv:
+            continue
+        try:
+            r = requests.post(srv["upload_url"],
+                files={"file1": ("product.jpg", img_bytes, "image/jpeg")}, timeout=120).json()
+        except Exception:
+            continue
+        if not r.get("hash") or not r.get("photos_list"):
+            log(f"⚠️ ВК upload в альбом: пустой ответ: {str(r)[:120]}")
+            continue
+        saved = vk_call("photos.savePhotos",
+                        {"group_id": VK_GROUP_ID, "album_id": album,
+                         "server": r.get("server", ""), "photos_list": r.get("photos_list", ""),
+                         "hash": r.get("hash", "")}, tok)
+        if saved:
+            p = saved[0]
+            att = f"photo{p['owner_id']}_{p['id']}"
+            if p.get("access_key"):
+                att += f"_{p['access_key']}"
+            return att
     return None
 
 def vk_upload(img_bytes):
     if VK_USER_TOKEN:
-        srv = vk_call("photos.getWallUploadServer",
-                      {"owner_id": "-" + VK_GROUP_ID}, VK_USER_TOKEN)
-        if srv and "upload_url" in srv:
+        for params in ({"owner_id": "-" + VK_GROUP_ID}, {"group_id": VK_GROUP_ID}):
+            srv = vk_call("photos.getWallUploadServer", params, VK_USER_TOKEN)
+            if not srv or "upload_url" not in srv:
+                continue
             try:
                 r = requests.post(srv["upload_url"],
                     files={"photo": ("product.jpg", img_bytes, "image/jpeg")}, timeout=120).json()
-            except Exception as e:
-                log(f"⚠️ ВК upload: {e}")
-                r = {}
-            if r.get("photo"):
-                sp = {"owner_id": "-" + VK_GROUP_ID, "photo": r["photo"],
-                      "server": r.get("server", ""), "hash": r.get("hash", "")}
-                saved = vk_call("photos.saveWallPhoto", sp, VK_USER_TOKEN)
-                if saved:
-                    p = saved[0]
-                    att = f"photo{p['owner_id']}_{p['id']}"
-                    if p.get("access_key"):
-                        att += f"_{p['access_key']}"
-                    log(f"✅ ВК: фото загружено (wall server) → {att}")
-                    return att
-        else:
-            log("⚠️ ВК: путь 1 недоступен (флуд/токен) — пробую альбом")
+            except Exception:
+                continue
+            if not r.get("photo"):
+                log("⚠️ VK upload вернул пустое photo (путь 1) — флуд")
+                continue
+            sp = dict(params)
+            sp.update({"photo": r["photo"], "server": r.get("server", ""), "hash": r.get("hash", "")})
+            saved = vk_call("photos.saveWallPhoto", sp, VK_USER_TOKEN)
+            if saved:
+                p = saved[0]
+                att = f"photo{p['owner_id']}_{p['id']}"
+                if p.get("access_key"):
+                    att += f"_{p['access_key']}"
+                log(f"✅ ВК: фото загружено (wall server) → {att}")
+                return att
+        log("⚠️ ВК: путь 1 недоступен (флуд/токен) — пробую альбом")
     att = vk_upload_via_album(img_bytes)
     if att:
         log(f"✅ ВК: фото загружено (через альбом группы) → {att}")
@@ -585,7 +632,7 @@ def main():
         imgs = parse_gallery(r) or parse_other_imgs(r)
         img = choose_image(imgs, u) if imgs else None
         if not img:
-            log("⚠️ Картинка товара недоступна (404/мелкая) — генерирую промптом")
+            log("⚠️ Картинка товара недоступна (404/мелкая) — генерирую (DALL-E 3 → HF → pollinations)")
             img = generate_product_image(title, desc)
         if not img:
             log(f"⚠️ Попытка {i+1}: не удалось получить картинку — {u}")
@@ -645,7 +692,7 @@ def main():
     tg_post(img, text)
 
     log("=" * 50)
-    log("✅ FINISH: товар → ВК sblgroup + TG → Дзен (обложка ≥700px, без водяных знаков)!")
+    log("✅ FINISH: товар → ВК sblgroup + TG → Дзен (обложка ≥700px)!")
     log("=" * 50)
 
 if __name__ == "__main__":
