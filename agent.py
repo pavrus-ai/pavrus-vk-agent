@@ -20,6 +20,7 @@ SITE = "https://pavrus.ru"
 SITEMAP = SITE + "/sitemap.xml"
 HISTORY = "history_vk.json"
 CACHE = "sitemap_cache.json"
+ALBUM_CACHE = "vk_album.json"
 CACHE_TTL_DAYS = 7
 API = "https://api.vk.com/method/"
 VK_V = "5.131"
@@ -63,10 +64,10 @@ CATEGORY_SEEDS = [
 def log(msg):
     print(msg, flush=True)
 
-log("Версия ℹ️ pavrus-vk-agent v19 (пользовательский токен ВК + паузы 30/90 + 8 ступеней ИИ)")
+log("Версия ℹ️ pavrus-vk-agent v20 (обход флуда getWallUploadServer: запасной путь через альбом группы)")
 
 # ============================================================
-# ИИ
+# ИИ: 8 ступеней
 # ============================================================
 
 def _extract(r):
@@ -139,7 +140,6 @@ def ai_openrouter(prompt, model, key):
     except Exception: return None
 
 def ai_call(prompt, minlen=400):
-    # 1) GitHub Models
     if not GH_AI_TOKEN:
         log("⚠️ github-models: GITHUB_TOKEN не передан! Добавьте в agent.yml: GITHUB_TOKEN: ${{ github.token }}")
     else:
@@ -148,7 +148,6 @@ def ai_call(prompt, minlen=400):
         if res and len(res) >= minlen:
             log(f"✅ Успех: github-models, {len(res)} симв.")
             return res
-    # 2) Cerebras
     if not CEREBRAS_KEY:
         log("⚠️ cerebras: CEREBRAS_KEY не передан в env!")
     else:
@@ -157,7 +156,6 @@ def ai_call(prompt, minlen=400):
         if res and len(res) >= minlen:
             log(f"✅ Успех: cerebras, {len(res)} симв.")
             return res
-    # 3) Mistral
     if not MISTRAL_KEY:
         log("⚠️ mistral: MISTRAL_KEY не передан в env!")
     else:
@@ -166,7 +164,6 @@ def ai_call(prompt, minlen=400):
         if res and len(res) >= minlen:
             log(f"✅ Успех: mistral, {len(res)} симв.")
             return res
-    # 4) Groq ×2
     for i, key in enumerate((GROQ_KEY, GROQ_KEY2)):
         if not key: continue
         log(f"🔄 Попытка: groq (llama-3.3-70b-versatile, ключ {i+1})...")
@@ -174,7 +171,6 @@ def ai_call(prompt, minlen=400):
         if res and len(res) >= minlen:
             log(f"✅ Успех: groq (ключ {i+1}), {len(res)} симв.")
             return res
-    # 5) OpenRouter ×4 ×2
     or_models = ["meta-llama/llama-3.3-70b-instruct:free",
                  "google/gemma-3-27b-it:free",
                  "deepseek/deepseek-chat-v3-0324:free",
@@ -395,7 +391,7 @@ def parse_text(r):
     return h1, desc, body
 
 # ============================================================
-# ВК v19: только пользовательский токен + паузы против флуд-контроля. 
+# ВК v20: два пути загрузки фото
 # ============================================================
 
 def vk_call(method, params, token):
@@ -411,12 +407,58 @@ def vk_call(method, params, token):
         log(f"⚠️ VK {method}: {str(r.get('error'))[:150]}")
         return None
     return r.get("response")
-def vk_upload(img_bytes):
-    if not VK_USER_TOKEN:
-        log("⚠️ ВК: нет VK_USER_TOKEN — пост без фото")
+
+def vk_get_album_id():
+    """ID альбома группы для фото товаров (создаётся один раз, кэш в vk_album.json)."""
+    try:
+        d = json.load(open(ALBUM_CACHE, encoding="utf-8"))
+        if d.get("album_id"):
+            return d["album_id"]
+    except Exception:
+        pass
+    res = vk_call("photos.createAlbum",
+                  {"title": "Товары", "description": "Фото товаров для постов",
+                   "group_id": VK_GROUP_ID}, VK_TOKEN)
+    if res and res.get("id"):
+        json.dump({"album_id": res["id"]}, open(ALBUM_CACHE, "w", encoding="utf-8"))
+        log(f"✅ ВК: создан альбом «Товары» id={res['id']}")
+        return res["id"]
+    return None
+
+def vk_upload_via_album(img_bytes):
+    """Запасной путь: групповой токен + альбом группы (минует флуд getWallUploadServer)."""
+    album = vk_get_album_id()
+    if not album:
+        log("⚠️ ВК: не удалось получить/создать альбом группы")
         return None
-    pauses = (30, 90)
-    for rnd in range(3):
+    srv = vk_call("photos.getUploadServer",
+                  {"group_id": VK_GROUP_ID, "album_id": album}, VK_TOKEN)
+    if not srv or "upload_url" not in srv:
+        return None
+    try:
+        r = requests.post(srv["upload_url"],
+            files={"file1": ("product.jpg", img_bytes, "image/jpeg")}, timeout=120).json()
+    except Exception as e:
+        log(f"⚠️ ВК upload в альбом: {e}")
+        return None
+    if not r.get("hash") or not r.get("photos_list"):
+        log(f"⚠️ ВК upload в альбом: пустой ответ: {str(r)[:120]}")
+        return None
+    saved = vk_call("photos.savePhotos",
+                    {"group_id": VK_GROUP_ID, "album_id": album,
+                     "server": r.get("server", ""), "photos_list": r.get("photos_list", ""),
+                     "hash": r.get("hash", "")}, VK_TOKEN)
+    if saved:
+        p = saved[0]
+        att = f"photo{p['owner_id']}_{p['id']}"
+        if p.get("access_key"):
+            att += f"_{p['access_key']}"
+        return att
+    return None
+
+def vk_upload(img_bytes):
+    # Путь 1: wall upload server (пользовательский токен), один проход без длинных пауз
+    if VK_USER_TOKEN:
         for params in ({"owner_id": "-" + VK_GROUP_ID}, {"group_id": VK_GROUP_ID}):
             srv = vk_call("photos.getWallUploadServer", params, VK_USER_TOKEN)
             if not srv or "upload_url" not in srv:
@@ -427,7 +469,7 @@ def vk_upload(img_bytes):
             except Exception:
                 continue
             if not r.get("photo"):
-                log(f"⚠️ VK upload вернул пустое photo (раунд {rnd+1})")
+                log("⚠️ VK upload вернул пустое photo (путь 1)")
                 continue
             sp = dict(params)
             sp.update({"photo": r["photo"], "server": r.get("server", ""), "hash": r.get("hash", "")})
@@ -437,11 +479,13 @@ def vk_upload(img_bytes):
                 att = f"photo{p['owner_id']}_{p['id']}"
                 if p.get("access_key"):
                     att += f"_{p['access_key']}"
-                log(f"✅ ВК: фото загружено → {att}")
+                log(f"✅ ВК: фото загружено (wall server) → {att}")
                 return att
-        if rnd < 2:
-            log(f"⏳ ВК: флуд-контроль, пауза {pauses[rnd]} сек (раунд {rnd+1}/3)")
-            time.sleep(pauses[rnd])
+    # Путь 2: альбом группы групповым токеном
+    att = vk_upload_via_album(img_bytes)
+    if att:
+        log(f"✅ ВК: фото загружено (через альбом группы) → {att}")
+        return att
     return None
 
 def vk_post(message, att):
