@@ -2,7 +2,7 @@ name: VK Agent
 
 on:
   schedule:
-    - cron: "20 9 * * *"
+    - cron: "10 7 * * *"
   workflow_dispatch:
 
 permissions:
