@@ -15,6 +15,7 @@ OR_KEY2 = os.environ.get("OPENROUTER_KEY2", "").strip()
 CEREBRAS_KEY = os.environ.get("CEREBRAS_KEY", "").strip()
 MISTRAL_KEY = os.environ.get("MISTRAL_KEY", "").strip()
 GH_AI_TOKEN = os.environ.get("GITHUB_TOKEN", "").strip()
+POLLINATIONS_TOKEN = os.environ.get("POLLINATIONS_TOKEN", "").strip()
 
 SITE = "https://pavrus.ru"
 SITEMAP = SITE + "/sitemap.xml"
@@ -64,7 +65,7 @@ CATEGORY_SEEDS = [
 def log(msg):
     print(msg, flush=True)
 
-log("Версия ℹ️ pavrus-vk-agent v23 (минимум вызовов фото-методов: 1 вызов путь1 + альбом только юзер-токеном)")
+log("Версия ℹ️ pavrus-vk-agent v24 (удаление водяного знака pollinations: токен или обрезка нижней полосы)")
 
 # ============================================================
 # ИИ: 8 ступеней
@@ -224,6 +225,21 @@ def ensure_size(img_bytes, min_w=1000):
         log(f"⚠️ ensure_size: {e}")
         return img_bytes
 
+def strip_watermark(img_bytes):
+    """v24: срезаем нижнюю полосу кадра (9%) — там pollinations.ai ставит логотип."""
+    try:
+        im = Image.open(io.BytesIO(img_bytes))
+        w, h = im.size
+        cut = int(h * 0.09)
+        im = im.crop((0, 0, w, h - cut))
+        buf = io.BytesIO()
+        im.convert("RGB").save(buf, "JPEG", quality=90)
+        log(f"✂️ Водяной знак: срезана нижняя полоса {cut}px (было {w}x{h}, стало {im.size[0]}x{im.size[1]})")
+        return buf.getvalue()
+    except Exception as e:
+        log(f"⚠️ strip_watermark: {e}")
+        return img_bytes
+
 # ============================================================
 # КЭШ КАРТЫ САЙТА
 # ============================================================
@@ -345,16 +361,22 @@ def choose_image(imgs, referer):
     return best
 
 def generate_product_image(title, desc):
+    """v24: с токеном pollinations — без водяного знака; без токена — знак срежется."""
     scene = (f"Professional conference hall with modern AV equipment: {title}. "
              f"{desc[:150]} Bright clean interior, warm daylight, photorealistic, "
              f"sharp focus, high resolution, no text, no logos, no people close-up")
     seed = int(time.time()) % 1000000
     url = (POLLINATIONS_API + requests.utils.quote(scene) +
            f"?nologo=true&seed={seed}&model=flux&width=1280&height=960")
+    if POLLINATIONS_TOKEN:
+        url += f"&token={POLLINATIONS_TOKEN}"
     try:
         r = requests.get(url, timeout=240)
         r.raise_for_status()
-        log(f"✅ Сгенерирована картинка промптом: {len(r.content)} байт")
+        log(f"✅ Сгенерирована картинка промптом: {len(r.content)} байт" +
+            (" (с токеном, без знака)" if POLLINATIONS_TOKEN else " (без токена — срежу знак)"))
+        if not POLLINATIONS_TOKEN:
+            return strip_watermark(r.content)
         return r.content
     except Exception as e:
         log(f"⚠️ Ошибка генерации картинки: {e}")
@@ -379,8 +401,8 @@ def parse_text(r):
     tail = re.sub(r"<style[^>]*>.*?</style>", " ", tail, flags=re.S | re.I)
     for mk in ["Назад к списку", "Нужна консультация", "Подробная информация"]:
         i = tail.find(mk)
-        if i != -1:
-            tail = tail[:i]
+            if i != -1:
+                tail = tail[:i]
     chunks = re.findall(r"<p[^>]*>(.*?)</p>", tail, re.S | re.I)
     chunks += re.findall(r'<div[^>]+class=["\'][^"\']*(?:descr|text|content|detail|char)[^"\']*["\'][^>]*>(.*?)</div>', tail, re.S | re.I)
     raw = " ".join(clean(c) for c in chunks)
@@ -391,7 +413,7 @@ def parse_text(r):
     return h1, desc, body
 
 # ============================================================
-# ВК v23: минимум вызовов фото-методов (не продлеваем себе флуд)
+# ВК v23: минимум вызовов фото-методов
 # ============================================================
 
 def vk_call(method, params, token):
@@ -409,7 +431,6 @@ def vk_call(method, params, token):
     return r.get("response")
 
 def vk_get_album_id():
-    """ID альбома «Товары»: секрет VK_ALBUM_ID → файл vk_album.json. Без API-вызовов."""
     env_id = os.environ.get("VK_ALBUM_ID", "").strip()
     if env_id.isdigit():
         return int(env_id)
@@ -422,7 +443,6 @@ def vk_get_album_id():
     return None
 
 def vk_upload_via_album(img_bytes):
-    """Путь 2: альбом группы, ТОЛЬКО пользовательским токеном, 2 вызова."""
     if not VK_USER_TOKEN:
         return None
     album = vk_get_album_id()
@@ -454,7 +474,6 @@ def vk_upload_via_album(img_bytes):
     return None
 
 def vk_upload(img_bytes):
-    # Путь 1: ОДИН вызов getWallUploadServer (юзер-токен)
     if VK_USER_TOKEN:
         srv = vk_call("photos.getWallUploadServer",
                       {"owner_id": "-" + VK_GROUP_ID}, VK_USER_TOKEN)
@@ -478,7 +497,6 @@ def vk_upload(img_bytes):
                     return att
         else:
             log("⚠️ ВК: путь 1 недоступен (флуд/токен) — пробую альбом")
-    # Путь 2: альбом группы (юзер-токен)
     att = vk_upload_via_album(img_bytes)
     if att:
         log(f"✅ ВК: фото загружено (через альбом группы) → {att}")
@@ -627,7 +645,7 @@ def main():
     tg_post(img, text)
 
     log("=" * 50)
-    log("✅ FINISH: товар → ВК sblgroup + TG → Дзен (обложка ≥700px)!")
+    log("✅ FINISH: товар → ВК sblgroup + TG → Дзен (обложка ≥700px, без водяных знаков)!")
     log("=" * 50)
 
 if __name__ == "__main__":
