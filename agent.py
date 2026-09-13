@@ -64,7 +64,7 @@ CATEGORY_SEEDS = [
 def log(msg):
     print(msg, flush=True)
 
-log("Версия ℹ️ pavrus-vk-agent v22 (альбом «Товары»: VK_ALBUM_ID / vk_album.json + обход флуда getWallUploadServer)")
+log("Версия ℹ️ pavrus-vk-agent v23 (минимум вызовов фото-методов: 1 вызов путь1 + альбом только юзер-токеном)")
 
 # ============================================================
 # ИИ: 8 ступеней
@@ -391,7 +391,7 @@ def parse_text(r):
     return h1, desc, body
 
 # ============================================================
-# ВК v22: два пути загрузки фото (wall server → альбом группы)
+# ВК v23: минимум вызовов фото-методов (не продлеваем себе флуд)
 # ============================================================
 
 def vk_call(method, params, token):
@@ -409,7 +409,7 @@ def vk_call(method, params, token):
     return r.get("response")
 
 def vk_get_album_id():
-    """ID альбома «Товары»: секрет VK_ALBUM_ID → файл vk_album.json → создать (юзер-токеном)."""
+    """ID альбома «Товары»: секрет VK_ALBUM_ID → файл vk_album.json. Без API-вызовов."""
     env_id = os.environ.get("VK_ALBUM_ID", "").strip()
     if env_id.isdigit():
         return int(env_id)
@@ -419,80 +419,66 @@ def vk_get_album_id():
             return d["album_id"]
     except Exception:
         pass
-    for tok in (VK_USER_TOKEN, VK_TOKEN):
-        if not tok:
-            continue
-        res = vk_call("photos.createAlbum",
-                      {"title": "Товары", "description": "Фото товаров для постов",
-                       "group_id": VK_GROUP_ID}, tok)
-        if res and res.get("id"):
-            try:
-                json.dump({"album_id": res["id"]}, open(ALBUM_CACHE, "w", encoding="utf-8"))
-            except Exception:
-                pass
-            log(f"✅ ВК: создан альбом «Товары» id={res['id']}")
-            return res["id"]
     return None
 
 def vk_upload_via_album(img_bytes):
-    """Запасной путь: загрузка фото в существующий альбом группы (минует флуд getWallUploadServer)."""
+    """Путь 2: альбом группы, ТОЛЬКО пользовательским токеном, 2 вызова."""
+    if not VK_USER_TOKEN:
+        return None
     album = vk_get_album_id()
     if not album:
-        log("⚠️ ВК: нет ID альбома (секрет VK_ALBUM_ID или файл vk_album.json)")
+        log("ℹ️ ВК: путь 2 пропущен (нет VK_ALBUM_ID / vk_album.json)")
         return None
-    for tok in (VK_USER_TOKEN, VK_TOKEN):
-        if not tok:
-            continue
-        srv = vk_call("photos.getUploadServer",
-                      {"group_id": VK_GROUP_ID, "album_id": album}, tok)
-        if not srv or "upload_url" not in srv:
-            continue
-        try:
-            r = requests.post(srv["upload_url"],
-                files={"file1": ("product.jpg", img_bytes, "image/jpeg")}, timeout=120).json()
-        except Exception:
-            continue
-        if not r.get("hash") or not r.get("photos_list"):
-            log(f"⚠️ ВК upload в альбом: пустой ответ: {str(r)[:120]}")
-            continue
-        saved = vk_call("photos.savePhotos",
-                        {"group_id": VK_GROUP_ID, "album_id": album,
-                         "server": r.get("server", ""), "photos_list": r.get("photos_list", ""),
-                         "hash": r.get("hash", "")}, tok)
-        if saved:
-            p = saved[0]
-            att = f"photo{p['owner_id']}_{p['id']}"
-            if p.get("access_key"):
-                att += f"_{p['access_key']}"
-            return att
+    srv = vk_call("photos.getUploadServer",
+                  {"group_id": VK_GROUP_ID, "album_id": album}, VK_USER_TOKEN)
+    if not srv or "upload_url" not in srv:
+        return None
+    try:
+        r = requests.post(srv["upload_url"],
+            files={"file1": ("product.jpg", img_bytes, "image/jpeg")}, timeout=120).json()
+    except Exception:
+        return None
+    if not r.get("hash") or not r.get("photos_list"):
+        log(f"⚠️ ВК upload в альбом: пустой ответ: {str(r)[:120]}")
+        return None
+    saved = vk_call("photos.savePhotos",
+                    {"group_id": VK_GROUP_ID, "album_id": album,
+                     "server": r.get("server", ""), "photos_list": r.get("photos_list", ""),
+                     "hash": r.get("hash", "")}, VK_USER_TOKEN)
+    if saved:
+        p = saved[0]
+        att = f"photo{p['owner_id']}_{p['id']}"
+        if p.get("access_key"):
+            att += f"_{p['access_key']}"
+        return att
     return None
 
 def vk_upload(img_bytes):
-    # Путь 1: wall upload server (пользовательский токен), один проход
+    # Путь 1: ОДИН вызов getWallUploadServer (юзер-токен)
     if VK_USER_TOKEN:
-        for params in ({"owner_id": "-" + VK_GROUP_ID}, {"group_id": VK_GROUP_ID}):
-            srv = vk_call("photos.getWallUploadServer", params, VK_USER_TOKEN)
-            if not srv or "upload_url" not in srv:
-                continue
+        srv = vk_call("photos.getWallUploadServer",
+                      {"owner_id": "-" + VK_GROUP_ID}, VK_USER_TOKEN)
+        if srv and "upload_url" in srv:
             try:
                 r = requests.post(srv["upload_url"],
                     files={"photo": ("product.jpg", img_bytes, "image/jpeg")}, timeout=120).json()
-            except Exception:
-                continue
-            if not r.get("photo"):
-                log("⚠️ VK upload вернул пустое photo (путь 1)")
-                continue
-            sp = dict(params)
-            sp.update({"photo": r["photo"], "server": r.get("server", ""), "hash": r.get("hash", "")})
-            saved = vk_call("photos.saveWallPhoto", sp, VK_USER_TOKEN)
-            if saved:
-                p = saved[0]
-                att = f"photo{p['owner_id']}_{p['id']}"
-                if p.get("access_key"):
-                    att += f"_{p['access_key']}"
-                log(f"✅ ВК: фото загружено (wall server) → {att}")
-                return att
-    # Путь 2: альбом группы (обход флуд-контроля)
+            except Exception as e:
+                log(f"⚠️ ВК upload: {e}")
+                r = {}
+            if r.get("photo"):
+                sp = {"owner_id": "-" + VK_GROUP_ID, "photo": r["photo"],
+                      "server": r.get("server", ""), "hash": r.get("hash", "")}
+                saved = vk_call("photos.saveWallPhoto", sp, VK_USER_TOKEN)
+                if saved:
+                    p = saved[0]
+                    att = f"photo{p['owner_id']}_{p['id']}"
+                    if p.get("access_key"):
+                        att += f"_{p['access_key']}"
+                    log(f"✅ ВК: фото загружено (wall server) → {att}")
+                    return att
+        else:
+            log("⚠️ ВК: путь 1 недоступен (флуд/токен) — пробую альбом")
+    # Путь 2: альбом группы (юзер-токен)
     att = vk_upload_via_album(img_bytes)
     if att:
         log(f"✅ ВК: фото загружено (через альбом группы) → {att}")
