@@ -1,14 +1,21 @@
 # -*- coding: utf-8 -*-
 import os, re, json, random, sys, time, datetime, requests, html, base64, uuid
 from urllib.parse import urljoin
+import warnings
+from requests.packages.urllib3.exceptions import InsecureRequestWarning
+warnings.simplefilter('ignore', InsecureRequestWarning)
 
-GROQ_KEY = os.environ.get("GROQ_KEY", "").strip()
-GROQ_KEY2 = os.environ.get("GROQ_KEY2", "").strip()
-OR_KEY = os.environ.get("OPENROUTER_KEY", "").strip()
-OR_KEY2 = os.environ.get("OPENROUTER_KEY2", "").strip()
-CEREBRAS_KEY = os.environ.get("CEREBRAS_KEY", "").strip()
-MISTRAL_KEY = os.environ.get("MISTRAL_KEY", "").strip()
-GH_AI_TOKEN = os.environ.get("GITHUB_TOKEN", "").strip()
+try:
+    from docx import Document
+    from docx.shared import Pt, Inches
+    from docx.enum.text import WD_ALIGN_PARAGRAPH
+    DOCX_OK = True
+except ImportError:
+    DOCX_OK = False
+    print("⚠️ python-docx не установлен — DOCX не будет создан")
+
+GIGACHAT_CLIENT_ID = os.environ.get("GIGACHAT_CLIENT_ID", "").strip()
+GIGACHAT_CLIENT_SECRET = os.environ.get("GIGACHAT_CLIENT_SECRET", "").strip()
 
 SITE = "https://pavrus.ru"
 SITEMAP = SITE + "/sitemap.xml"
@@ -18,7 +25,7 @@ UA = {"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/1
 # ⚠️ СТРОГО только PAVRUS
 BRAND_SLUG = "pavrus"
 
-# Список городов и мусора для очистки
+# Список мусора для очистки
 JUNK_PATTERNS = [
     r"Санкт-Петербург|Москва|Новосибирск|Краснодар|Красноярск",
     r"Войти|Выйти|Регистрация|Личный кабинет",
@@ -60,131 +67,65 @@ CATEGORY_SEEDS = [
 def log(msg):
     print(msg, flush=True)
 
-log("Версия ℹ️ pavrus-articles-agent v4 (чистый парсинг + умная генерация + только бренд PAVRUS)")
+log("Версия ℹ️ pavrus-articles-agent v5 (только GigaChat + DOCX + объёмная статья → новость)")
 
 # ============================================================
-# ИИ-ГЕНЕРАЦИЯ (8 ступеней)
+# GigaChat: OAuth 2.0 + чат (с отключением SSL-проверки)
 # ============================================================
 
-def _extract(r):
-    try: return r["choices"][0]["message"]["content"].strip()
-    except (KeyError, IndexError, TypeError): return None
+_GIGACHAT_TOKEN = None
+_GIGACHAT_TOKEN_EXPIRY = 0
 
-RU_SUFFIX = "\n\nВАЖНО: Пиши ТОЛЬКО на русском языке."
-
-def ai_github(prompt):
-    if not GH_AI_TOKEN: return None
-    endpoints = ["https://models.github.ai/inference/chat/completions",
-                 "https://models.inference.ai.azure.com/chat/completions"]
-    models = ["openai/gpt-4o-mini", "gpt-4o-mini"]
-    for ep in endpoints:
-        for mdl in models:
-            try:
-                r = requests.post(ep,
-                    headers={"Authorization": f"Bearer {GH_AI_TOKEN}"},
-                    json={"model": mdl, "temperature": 0.7,
-                          "messages": [{"role": "user", "content": prompt + RU_SUFFIX}]}, timeout=90).json()
-                if "error" in r: continue
-                res = _extract(r)
-                if res: return res
-            except Exception:
-                continue
+def get_gigachat_token():
+    """Получает токен GigaChat (действует 30 минут). Кэшируется в памяти."""
+    global _GIGACHAT_TOKEN, _GIGACHAT_TOKEN_EXPIRY
+    if not GIGACHAT_CLIENT_ID or not GIGACHAT_CLIENT_SECRET:
+        return None
+    if _GIGACHAT_TOKEN and time.time() < _GIGACHAT_TOKEN_EXPIRY:
+        return _GIGACHAT_TOKEN
+    try:
+        credentials = base64.b64encode(f"{GIGACHAT_CLIENT_ID}:{GIGACHAT_CLIENT_SECRET}".encode()).decode()
+        r = requests.post("https://ngw.devices.sberbank.ru:9443/api/v2/oauth",
+            headers={"Authorization": f"Basic {credentials}",
+                     "RqUID": str(uuid.uuid4()),
+                     "Content-Type": "application/x-www-form-urlencoded"},
+            data={"scope": "GIGACHAT_API_PERS"}, 
+            timeout=30,
+            verify=False)
+        if "access_token" in r:
+            _GIGACHAT_TOKEN = r["access_token"]
+            _GIGACHAT_TOKEN_EXPIRY = time.time() + 1700
+            log("✅ GigaChat: токен получен (действует 30 мин)")
+            return _GIGACHAT_TOKEN
+        log(f"️ GigaChat token error: {str(r)[:120]}")
+    except Exception as e:
+        log(f"⚠️ GigaChat auth error: {e}")
     return None
 
-def ai_cerebras(prompt):
-    if not CEREBRAS_KEY: return None
+def ai_gigachat(prompt, minlen=1500):
+    """GigaChat: генерация текста."""
+    token = get_gigachat_token()
+    if not token:
+        return None
     try:
-        r = requests.post("https://api.cerebras.ai/v1/chat/completions",
-            headers={"Authorization": f"Bearer {CEREBRAS_KEY}"},
-            json={"model": "llama-3.3-70b", "temperature": 0.7,
-                  "messages": [{"role": "user", "content": prompt + RU_SUFFIX}]}, timeout=90).json()
-        if "error" in r: return None
-        return _extract(r)
-    except Exception: return None
-
-def ai_mistral(prompt):
-    if not MISTRAL_KEY: return None
-    try:
-        r = requests.post("https://api.mistral.ai/v1/chat/completions",
-            headers={"Authorization": f"Bearer {MISTRAL_KEY}"},
-            json={"model": "mistral-small-latest", "temperature": 0.7,
-                  "messages": [{"role": "user", "content": prompt + RU_SUFFIX}]}, timeout=90).json()
-        if "error" in r: return None
-        return _extract(r)
-    except Exception: return None
-
-def ai_groq(prompt, key):
-    if not key: return None
-    try:
-        r = requests.post("https://api.groq.com/openai/v1/chat/completions",
-            headers={"Authorization": f"Bearer {key}"},
-            json={"model": "llama-3.3-70b-versatile", "temperature": 0.7,
-                  "messages": [{"role": "user", "content": prompt + RU_SUFFIX}]}, timeout=90).json()
-        if "error" in r: return None
-        return _extract(r)
-    except Exception: return None
-
-def ai_openrouter(prompt, model, key):
-    if not key: return None
-    try:
-        r = requests.post("https://openrouter.ai/api/v1/chat/completions",
-            headers={"Authorization": f"Bearer {key}", "HTTP-Referer": "https://github.com"},
-            json={"model": model, "temperature": 0.7, "max_tokens": 4000,
-                  "messages": [{"role": "user", "content": prompt + RU_SUFFIX}]}, timeout=90).json()
-        if "error" in r: return None
-        return _extract(r)
-    except Exception: return None
-
-def ai_call(prompt, minlen=800):
-    """Пытается все модели, возвращает первый успешный результат."""
-    # 1) GitHub Models
-    if GH_AI_TOKEN:
-        log("🔄 Попытка: github-models (gpt-4o-mini)...")
-        res = ai_github(prompt)
-        if res and len(res) >= minlen:
-            log(f"✅ Успех: github-models, {len(res)} симв.")
+        r = requests.post("https://gigachat.devices.sberbank.ru/api/v1/chat/completions",
+            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+            json={"model": "GigaChat:latest", "temperature": 0.7, "max_tokens": 4000,
+                  "messages": [{"role": "user", "content": prompt + "\n\nВАЖНО: Пиши ТОЛЬКО на русском языке."}]}, 
+            timeout=90, 
+            verify=False)
+        if "error" in r:
+            log(f"️ GigaChat: {str(r['error'])[:120]}")
+            return None
+        res = r["choices"][0]["message"]["content"].strip()
+        if len(res) >= minlen:
+            log(f"✅ GigaChat: {len(res)} симв.")
             return res
-    
-    # 2) Cerebras
-    if CEREBRAS_KEY:
-        log("🔄 Попытка: cerebras (llama-3.3-70b)...")
-        res = ai_cerebras(prompt)
-        if res and len(res) >= minlen:
-            log(f"✅ Успех: cerebras, {len(res)} симв.")
-            return res
-    
-    # 3) Mistral
-    if MISTRAL_KEY:
-        log("🔄 Попытка: mistral (mistral-small)...")
-        res = ai_mistral(prompt)
-        if res and len(res) >= minlen:
-            log(f"✅ Успех: mistral, {len(res)} симв.")
-            return res
-    
-    # 4) Groq ×2
-    for i, key in enumerate((GROQ_KEY, GROQ_KEY2)):
-        if not key: continue
-        log(f"🔄 Попытка: groq (ключ {i+1})...")
-        res = ai_groq(prompt, key)
-        if res and len(res) >= minlen:
-            log(f"✅ Успех: groq (ключ {i+1}), {len(res)} симв.")
-            return res
-    
-    # 5) OpenRouter ×4 ×2
-    or_models = ["meta-llama/llama-3.3-70b-instruct:free",
-                 "google/gemma-3-27b-it:free",
-                 "deepseek/deepseek-chat-v3-0324:free",
-                 "auto"]
-    for i, key in enumerate((OR_KEY, OR_KEY2)):
-        if not key: continue
-        for model in or_models:
-            log(f"🔄 Попытка: openrouter ({model}, ключ {i+1})...")
-            res = ai_openrouter(prompt, model, key)
-            if res and len(res) >= minlen:
-                log(f"✅ Успех: openrouter ({model}, ключ {i+1}), {len(res)} симв.")
-                return res
-    
-    return None
+        log(f"⚠️ GigaChat: текст короткий ({len(res)} симв., нужно {minlen})")
+        return res if res else None
+    except Exception as e:
+        log(f"⚠️ GigaChat error: {e}")
+        return None
 
 # ============================================================
 # ПАРСИНГ САЙТА (чистый)
@@ -195,10 +136,8 @@ def clean(s):
     for _ in range(3):
         s = html.unescape(s)
         s = re.sub(r"<[^>]+>", " ", s)
-    # Удаляем мусор
     for pattern in JUNK_PATTERNS:
         s = re.sub(pattern, "", s, flags=re.IGNORECASE)
-    # Чистим пробелы
     s = re.sub(r"\s+", " ", s).strip()
     return s
 
@@ -227,15 +166,13 @@ def fetch_sitemap():
                 urls += [u for u in re.findall(r"<loc>\s*(.*?)\s*</loc>", x) if "/catalog/" in u]
             except Exception: continue
     except Exception as e:
-        log(f"️ Sitemap недоступен: {e}")
+        log(f"⚠️ Sitemap недоступен: {e}")
         return []
     
     urls = sorted(set(urls))
-    
-    # ФИЛЬТР: оставляем ТОЛЬКО товары PAVRUS
     pavrus_urls = [u for u in urls if is_pavrus_brand(u)]
     log(f"ℹ️ Этап 1: всего ссылок /catalog/: {len(urls)}")
-    log(f"🎯 После фильтра по бренду PAVRUS: {len(pavrus_urls)} ссылок")
+    log(f" После фильтра по бренду PAVRUS: {len(pavrus_urls)} ссылок")
     
     if len(pavrus_urls) < 10:
         log("⚠️ Мало ссылок PAVRUS — обход разделов каталога")
@@ -248,7 +185,7 @@ def fetch_sitemap():
                         pavrus_urls.append(u)
             except Exception: continue
         pavrus_urls = sorted(set(pavrus_urls))
-        log(f" После обхода разделов: {len(pavrus_urls)} ссылок PAVRUS")
+        log(f"🎯 После обхода разделов: {len(pavrus_urls)} ссылок PAVRUS")
     
     if not pavrus_urls:
         raise RuntimeError("Нет ссылок на товары PAVRUS")
@@ -256,29 +193,21 @@ def fetch_sitemap():
 
 def parse_page(html_text):
     """Извлекает только полезный контент со страницы товара."""
-    # H1
     h1 = ""
     m = re.search(r"<h1[^>]*>(.*?)</h1>", html_text, re.S | re.I)
     if m: h1 = clean(m.group(1))
     
-    # Мета-описание
     desc = ""
     dm = re.search(r'<meta[^>]+name=["\']description["\'][^>]+content=["\'](.*?)["\']', html_text, re.S | re.I)
     if dm: desc = clean(dm.group(1))
     
-    # Основной контент — ищем только в описании товара
     tail = html_text
-    
-    # Удаляем скрипты и стили
     tail = re.sub(r"<script[^>]*>.*?</script>", " ", tail, flags=re.S | re.I)
     tail = re.sub(r"<style[^>]*>.*?</style>", " ", tail, flags=re.S | re.I)
-    
-    # Удаляем навигацию и меню
     tail = re.sub(r"<nav[^>]*>.*?</nav>", " ", tail, flags=re.S | re.I)
     tail = re.sub(r"<header[^>]*>.*?</header>", " ", tail, flags=re.S | re.I)
     tail = re.sub(r"<footer[^>]*>.*?</footer>", " ", tail, flags=re.S | re.I)
     
-    # Ищем только описание товара (обычно в div с классом description или detail)
     desc_block = ""
     for cls in ["description", "descr", "detail", "product-description", "tab-content"]:
         m = re.search(rf'<div[^>]+class=["\'][^"\']*{cls}[^"\']*["\'][^>]*>(.*?)</div>', tail, re.S | re.I)
@@ -287,21 +216,16 @@ def parse_page(html_text):
             break
     
     if not desc_block:
-        # Если не нашли блок описания, берём все абзацы
         chunks = re.findall(r"<p[^>]*>(.*?)</p>", tail, re.S | re.I)
         desc_block = " ".join(chunks)
     
-    # Чистим текст
     raw = clean(desc_block)
-    
-    # Разбиваем на предложения и оставляем только осмысленные
     sentences = raw.split(". ")
     keep = []
     for s in sentences:
         s = s.strip()
         if len(s) < 20: continue
         if "{" in s or "}" in s: continue
-        # Проверяем, что это не мусор
         if any(junk in s.lower() for junk in ["корзин", "кабинет", "войти", "каталог", "контакты"]):
             continue
         keep.append(s)
@@ -323,7 +247,7 @@ def pick_page(urls, hist):
         
         h1, desc, body = parse_page(r)
         if not h1 or (len(body) + len(desc)) < 50:
-            log(f"⚠️ Страница {page}: мало текста (H1={h1[:50]}, body={len(body)})")
+            log(f"⚠️ Страница {page}: мало текста")
             return None, "", "", ""
         
         log(f"✅ Этап 2: товар PAVRUS «{h1[:70]}» — {page}")
@@ -331,41 +255,66 @@ def pick_page(urls, hist):
         log(f"   Текст: {body[:100]}...")
         return page, h1, desc, body
     except Exception as e:
-        log(f"⚠️ Ошибка загрузки {page}: {e}")
+        log(f"️ Ошибка загрузки {page}: {e}")
         return None, "", "", ""
 
 # ============================================================
-# ГЕНЕРАЦИЯ СТАТЬИ И НОВОСТИ
+# ГЕНЕРАЦИЯ СТАТЬИ (объёмный промпт)
 # ============================================================
 
 def generate_article(title, desc, body, url):
-    """Генерирует статью на основе чистых данных."""
-    # Простой промпт
+    """Генерирует объёмную статью через детальный промпт."""
+    # ДЕТАЛЬНЫЙ ПРОМПТ для объёмной статьи
     prompt = (
-        f"Напиши статью о товаре PAVRUS.\n\n"
-        f"Название: {title}\n"
-        f"Краткое описание: {desc}\n"
-        f"Характеристики: {body[:500]}\n\n"
-        f"Требования:\n"
-        f"1. Длина 800-1500 символов.\n"
-        f"2. HTML-разметка: <h2> для разделов, <p> для текста.\n"
-        f"3. Структура:\n"
-        f"   <h2>Что это такое</h2>\n"
-        f"   <p>введение</p>\n"
-        f"   <h2>Применение</h2>\n"
-        f"   <p>где используется</p>\n"
-        f"   <h2>Особенности</h2>\n"
-        f"   <p>преимущества</p>\n"
-        f"4. В конце: «По вопросам обращайтесь к специалистам PAVRUS».\n"
-        f"5. Пиши как эксперт по AV-оборудованию."
+        f"Напиши развёрнутую экспертную статью о профессиональном AV-оборудовании PAVRUS.\n\n"
+        f"НАЗВАНИЕ ТОВАРА: {title}\n"
+        f"КРАТКОЕ ОПИСАНИЕ: {desc}\n"
+        f"ТЕХНИЧЕСКИЕ ХАРАКТЕРИСТИКИ: {body[:800]}\n"
+        f"ССЫЛКА НА ТОВАР: {url}\n\n"
+        f"ТРЕБОВАНИЯ К СТАТЬЕ:\n"
+        f"1. Язык: ТОЛЬКО русский.\n"
+        f"2. Длина: СТРОГО 1800-2500 символов (не меньше!).\n"
+        f"3. Формат: HTML-разметка (<h2> для разделов, <p> для абзацев).\n"
+        f"4. СТРУКТУРА (обязательно все разделы):\n"
+        f"   <h2>Введение: что это за оборудование</h2>\n"
+        f"   <p>2-3 абзаца: общее описание, место в линейке PAVRUS, для каких задач создано.</p>\n"
+        f"   <h2>Технические характеристики и возможности</h2>\n"
+        f"   <p>2-3 абзаца: подробно о ключевых параметрах, что они дают на практике.</p>\n"
+        f"   <h2>Сферы применения</h2>\n"
+        f"   <p>2 абзаца: конференц-залы, корпоративные мероприятия, образовательные учреждения, театры, студии.</p>\n"
+        f"   <h2>Ключевые преимущества</h2>\n"
+        f"   <p>2 абзаца: чем отличается от аналогов, надёжность, удобство использования.</p>\n"
+        f"   <h2>Рекомендации по использованию</h2>\n"
+        f"   <p>1-2 абзаца: советы по установке, настройке, эксплуатации.</p>\n"
+        f"   <h2>Заключение</h2>\n"
+        f"   <p>1 абзац: итог + призыв обратиться к специалистам PAVRUS.</p>\n"
+        f"5. СТИЛЬ: профессиональный, но живой. Пиши как эксперт по AV-оборудованию с 10-летним опытом.\n"
+        f"6. НЕ используй слова «инновационный», «революционный», «уникальный» без конкретики.\n"
+        f"7. НЕ добавляй внешних ссылок кроме {url}.\n"
+        f"8. В последнем абзаце обязательно: «По всем вопросам обращайтесь к специалистам компании PAVRUS».\n"
     )
     
-    article = ai_call(prompt, minlen=800)
+    article = ai_gigachat(prompt, minlen=1500)
     if article:
         return article
     
-    # Если ИИ не сработал, создаём минимальную статью из чистых данных
-    log("⚠️ ИИ недоступны — создаю минимальную статью из данных")
+    # Если GigaChat не справился — пробуем упрощённый промпт
+    log("⚠️ Не удалось создать объёмную статью — пробую упрощённую версию")
+    prompt_short = (
+        f"Напиши статью о товаре PAVRUS «{title}».\n"
+        f"Описание: {desc}\n"
+        f"Характеристики: {body[:500]}\n\n"
+        f"Требования: 1500-2000 символов, HTML-разметка (h2, p), "
+        f"структура: что это, характеристики, применение, преимущества, рекомендации. "
+        f"В конце призыв обратиться к специалистам PAVRUS."
+    )
+    
+    article = ai_gigachat(prompt_short, minlen=1200)
+    if article:
+        return article
+    
+    # Полный фолбэк
+    log("⚠️ GigaChat недоступен — создаю минимальную статью из данных")
     return f"""<h2>{title}</h2>
 <p>{desc if desc else 'Профессиональное AV-оборудование PAVRUS.'}</p>
 <h2>Применение</h2>
@@ -374,23 +323,36 @@ def generate_article(title, desc, body, url):
 <p>{body[:300] if body else 'Высокое качество и надёжность.'}</p>
 <p>По вопросам обращайтесь к специалистам PAVRUS.</p>"""
 
+# ============================================================
+# ГЕНЕРАЦИЯ НОВОСТИ (сжатие статьи)
+# ============================================================
+
 def generate_news_from_article(article, title, url):
-    """Создаёт новость на основе статьи."""
+    """Создаёт краткую новость на основе статьи."""
     # Извлекаем чистый текст
     plain_text = re.sub(r"<[^>]+>", " ", article).strip()
     plain_text = re.sub(r"\s+", " ", plain_text)
     
     prompt = (
-        f"Создай краткую новость (500-800 символов) на основе статьи.\n\n"
-        f"Статья: {plain_text[:1000]}\n"
-        f"Товар: {title}\n\n"
-        f"Требования:\n"
-        f"1. HTML-разметка: <h2> заголовок, <p> текст.\n"
-        f"2. 2-3 абзаца.\n"
-        f"3. В конце: «Подробнее у специалистов PAVRUS»."
+        f"Создай краткую новость на основе статьи о товаре PAVRUS.\n\n"
+        f"ИСХОДНАЯ СТАТЬЯ:\n{plain_text[:2000]}\n\n"
+        f"НАЗВАНИЕ ТОВАРА: {title}\n"
+        f"ССЫЛКА: {url}\n\n"
+        f"ТРЕБОВАНИЯ К НОВОСТИ:\n"
+        f"1. Язык: ТОЛЬКО русский.\n"
+        f"2. Длина: СТРОГО 500-700 символов.\n"
+        f"3. Формат: HTML-разметка (<h2> заголовок, <p> абзацы).\n"
+        f"4. Структура:\n"
+        f"   <h2>Краткий заголовок</h2>\n"
+        f"   <p>1 абзац: что это за товар и его главное назначение.</p>\n"
+        f"   <p>1 абзац: ключевая особенность или преимущество.</p>\n"
+        f"   <p>1 абзац: призыв к действию.</p>\n"
+        f"5. Сохрани суть: что это, главное применение, ключевая особенность.\n"
+        f"6. В конце: «Подробнее — у специалистов PAVRUS».\n"
+        f"7. Пиши живо, как новостной анонс для сайта компании.\n"
     )
     
-    news = ai_call(prompt, minlen=400)
+    news = ai_gigachat(prompt, minlen=400)
     if news:
         return news
     
@@ -398,6 +360,71 @@ def generate_news_from_article(article, title, url):
     log("⚠️ Не удалось сгенерировать новость — сжимаю статью")
     short = plain_text[:600].rsplit(".", 1)[0] + "."
     return f"<h2>{title}</h2><p>{short}</p><p>Подробнее у специалистов PAVRUS.</p>"
+
+# ============================================================
+# СОЗДАНИЕ DOCX
+# ============================================================
+
+def create_docx(title, article, news, url, date_str, slug):
+    """Создаёт DOCX файл со статьёй и новостью."""
+    if not DOCX_OK:
+        log("⚠️ python-docx не установлен — пропускаю создание DOCX")
+        return None
+    
+    doc = Document()
+    
+    # Заголовок документа
+    doc.add_heading(f'PAVRUS: {title}', 0)
+    doc.add_paragraph(f'Дата: {date_str}', style='Intense Quote')
+    doc.add_paragraph(f'Ссылка на товар: {url}', style='Intense Quote')
+    doc.add_paragraph()
+    
+    # Статья
+    doc.add_heading('СТАТЬЯ', 1)
+    
+    # Парсим HTML статьи
+    article_plain = re.sub(r"<h2[^>]*>(.*?)</h2>", r"\n\1\n", article)
+    article_plain = re.sub(r"<h3[^>]*>(.*?)</h3>", r"\n\1\n", article_plain)
+    article_plain = re.sub(r"<p[^>]*>(.*?)</p>", r"\n\1\n", article_plain)
+    article_plain = re.sub(r"<[^>]+>", "", article_plain)
+    article_plain = re.sub(r"\n+", "\n", article_plain).strip()
+    
+    for line in article_plain.split('\n'):
+        line = line.strip()
+        if not line:
+            continue
+        # Если строка похожа на заголовок (короткая, без точки в конце)
+        if len(line) < 100 and not line.endswith('.') and not line.endswith(','):
+            doc.add_heading(line, 2)
+        else:
+            doc.add_paragraph(line)
+    
+    doc.add_page_break()
+    
+    # Новость
+    doc.add_heading('НОВОСТЬ', 1)
+    
+    news_plain = re.sub(r"<h2[^>]*>(.*?)</h2>", r"\n\1\n", news)
+    news_plain = re.sub(r"<p[^>]*>(.*?)</p>", r"\n\1\n", news_plain)
+    news_plain = re.sub(r"<[^>]+>", "", news_plain)
+    news_plain = re.sub(r"\n+", "\n", news_plain).strip()
+    
+    for line in news_plain.split('\n'):
+        line = line.strip()
+        if not line:
+            continue
+        if len(line) < 100 and not line.endswith('.') and not line.endswith(','):
+            doc.add_heading(line, 2)
+        else:
+            doc.add_paragraph(line)
+    
+    # Сохраняем
+    output_dir = "articles_output"
+    os.makedirs(output_dir, exist_ok=True)
+    docx_path = f"{output_dir}/{date_str}_{slug}.docx"
+    doc.save(docx_path)
+    log(f"✅ DOCX создан: {docx_path}")
+    return docx_path
 
 # ============================================================
 # ГЛАВНАЯ ЛОГИКА
@@ -419,13 +446,13 @@ def main():
         log("❌ Не найдена подходящая страница PAVRUS")
         sys.exit(1)
     
-    log("📝 Этап 3: генерация статьи...")
+    log("📝 Этап 3: генерация объёмной статьи (1500-2500 симв.)...")
     article = generate_article(title, desc, body, page)
     if not article:
         log("❌ Не удалось сгенерировать статью")
         sys.exit(1)
     
-    log("📰 Этап 4: генерация новости...")
+    log("📰 Этап 4: генерация новости (500-700 симв.)...")
     news = generate_news_from_article(article, title, page)
     if not news:
         log("❌ Не удалось сгенерировать новость")
@@ -449,11 +476,13 @@ def main():
     log("✅ FINISH: статья и новость по товару PAVRUS сгенерированы!")
     log("=" * 60)
     
+    # Сохраняем файлы
     output_dir = "articles_output"
     os.makedirs(output_dir, exist_ok=True)
     slug = re.sub(r"[^a-z0-9]+", "-", title.lower())[:50]
     date_str = datetime.date.today().strftime("%Y-%m-%d")
     
+    # HTML файлы
     with open(f"{output_dir}/{date_str}_{slug}_article.html", "w", encoding="utf-8") as f:
         f.write(f"<!DOCTYPE html><html><head><meta charset='utf-8'><title>{title}</title></head>"
                 f"<body><h1>{title} (PAVRUS)</h1>{article}<p><a href='{page}'>Подробнее на сайте</a></p></body></html>")
@@ -462,8 +491,12 @@ def main():
         f.write(f"<!DOCTYPE html><html><head><meta charset='utf-8'><title>{title}</title></head>"
                 f"<body>{news}<p><a href='{page}'>Подробнее</a></p></body></html>")
     
+    # Текстовый файл
     with open(f"{output_dir}/{date_str}_{slug}_texts.txt", "w", encoding="utf-8") as f:
         f.write(f"ТОВАР PAVRUS: {title}\nССЫЛКА: {page}\n\n=== СТАТЬЯ ===\n{article}\n\n=== НОВОСТЬ ===\n{news}")
+    
+    # DOCX файл
+    create_docx(title, article, news, page, date_str, slug)
     
     log(f"💾 Файлы сохранены в папке {output_dir}/")
 
