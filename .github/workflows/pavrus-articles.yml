@@ -30,10 +30,12 @@ jobs:
           CEREBRAS_KEY: ${{ secrets.CEREBRAS_KEY }}
           MISTRAL_KEY: ${{ secrets.MISTRAL_KEY }}
           GITHUB_TOKEN: ${{ github.token }}
+          GIGACHAT_CLIENT_ID: ${{ secrets.GIGACHAT_CLIENT_ID }}
+          GIGACHAT_CLIENT_SECRET: ${{ secrets.GIGACHAT_CLIENT_SECRET }}
 
       - name: Commit articles
         run: |
           git config --global user.name "pavrus-agent"
           git config --global user.email "pavrus-ai@users.noreply.github.com"
           git add articles_output/ articles_history.json || true
-          git diff --staged --quiet || (git commit -m "chore: new article and news [skip ci]" && git push)
+          git diff --staged --quiet || (git commit -m "chore: new article and news PAVRUS [skip ci]" && git push)
