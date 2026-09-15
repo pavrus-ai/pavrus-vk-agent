@@ -1,0 +1,39 @@
+name: Pavrus Articles Agent
+
+on:
+  schedule:
+    - cron: "0 7 */10 * *"  # 07:00 UTC = 14:00 Новосибирск, каждые 10 дней
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  generate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - run: pip install requests
+
+      - name: Generate article and news
+        run: python pavrus_articles_agent.py
+        env:
+          GROQ_KEY: ${{ secrets.GROQ_KEY }}
+          GROQ_KEY2: ${{ secrets.GROQ_KEY2 }}
+          OPENROUTER_KEY: ${{ secrets.OPENROUTER_KEY }}
+          OPENROUTER_KEY2: ${{ secrets.OPENROUTER_KEY2 }}
+          CEREBRAS_KEY: ${{ secrets.CEREBRAS_KEY }}
+          MISTRAL_KEY: ${{ secrets.MISTRAL_KEY }}
+          GITHUB_TOKEN: ${{ github.token }}
+
+      - name: Commit articles
+        run: |
+          git config --global user.name "pavrus-agent"
+          git config --global user.email "pavrus-ai@users.noreply.github.com"
+          git add articles_output/ articles_history.json || true
+          git diff --staged --quiet || (git commit -m "chore: new article and news [skip ci]" && git push)
