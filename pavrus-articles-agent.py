@@ -127,7 +127,7 @@ def ai_openrouter(prompt, model, key):
     except Exception: return None
 
 # ============================================================
-# GigaChat: OAuth 2.0 + чат
+# GigaChat: OAuth 2.0 + чат (с отключением SSL-проверки)
 # ============================================================
 
 _GIGACHAT_TOKEN = None
@@ -142,11 +142,14 @@ def get_gigachat_token():
         return _GIGACHAT_TOKEN
     try:
         credentials = base64.b64encode(f"{GIGACHAT_CLIENT_ID}:{GIGACHAT_CLIENT_SECRET}".encode()).decode()
+        # ⚠️ Отключаем проверку SSL (нужно для GitHub Actions)
         r = requests.post("https://ngw.devices.sberbank.ru:9443/api/v2/oauth",
             headers={"Authorization": f"Basic {credentials}",
                      "RqUID": str(uuid.uuid4()),
                      "Content-Type": "application/x-www-form-urlencoded"},
-            data={"scope": "GIGACHAT_API_PERS"}, timeout=30).json()
+            data={"scope": "GIGACHAT_API_PERS"}, 
+            timeout=30,
+            verify=False)  # ← ВАЖНО: отключаем SSL-проверку
         if "access_token" in r:
             _GIGACHAT_TOKEN = r["access_token"]
             _GIGACHAT_TOKEN_EXPIRY = time.time() + 1700  # 28 минут с запасом
@@ -166,9 +169,9 @@ def ai_gigachat(prompt):
         r = requests.post("https://gigachat.devices.sberbank.ru/api/v1/chat/completions",
             headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
             json={"model": "GigaChat:latest", "temperature": 0.7, "max_tokens": 4000,
-                  "messages": [{"role": "user", "content": prompt + RU_SUFFIX}]}, timeout=90).json()
+                  "messages": [{"role": "user", "content": prompt + RU_SUFFIX}]}, timeout=90, verify=False)
         if "error" in r:
-            log(f"️ GigaChat: {str(r['error'])[:120]}")
+            log(f"⚠️ GigaChat: {str(r['error'])[:120]}")
             return None
         return r["choices"][0]["message"]["content"].strip()
     except Exception as e:
@@ -184,7 +187,7 @@ def ai_call(prompt, minlen=1500):
     if not GH_AI_TOKEN:
         log("⚠️ github-models: GITHUB_TOKEN не передан")
     else:
-        log("🔄 Попытка: github-models (gpt-4o-mini)...")
+        log(" Попытка: github-models (gpt-4o-mini)...")
         res = ai_github(prompt)
         if res and len(res) >= minlen:
             log(f"✅ Успех: github-models, {len(res)} симв.")
@@ -200,9 +203,9 @@ def ai_call(prompt, minlen=1500):
             return res
     # 3) Mistral
     if not MISTRAL_KEY:
-        log("⚠️ mistral: MISTRAL_KEY не передан")
+        log("️ mistral: MISTRAL_KEY не передан")
     else:
-        log("🔄 Попытка: mistral (mistral-small)...")
+        log(" Попытка: mistral (mistral-small)...")
         res = ai_mistral(prompt)
         if res and len(res) >= minlen:
             log(f"✅ Успех: mistral, {len(res)} симв.")
@@ -223,7 +226,7 @@ def ai_call(prompt, minlen=1500):
     for i, key in enumerate((OR_KEY, OR_KEY2)):
         if not key: continue
         for model in or_models:
-            log(f" Попытка: openrouter ({model}, ключ {i+1})...")
+            log(f"🔄 Попытка: openrouter ({model}, ключ {i+1})...")
             res = ai_openrouter(prompt, model, key)
             if res and len(res) >= minlen:
                 log(f"✅ Успех: openrouter ({model}, ключ {i+1}), {len(res)} симв.")
@@ -274,12 +277,12 @@ def fetch_sitemap():
                 urls += [u for u in re.findall(r"<loc>\s*(.*?)\s*</loc>", x) if "/catalog/" in u]
             except Exception: continue
     except Exception as e:
-        log(f"️ Sitemap недоступен: {e}")
+        log(f"⚠️ Sitemap недоступен: {e}")
         return []
     
     urls = sorted(set(urls))
     
-    # ⚠️ ФИЛЬТР: оставляем ТОЛЬКО товары PAVRUS
+    # ️ ФИЛЬТР: оставляем ТОЛЬКО товары PAVRUS
     pavrus_urls = [u for u in urls if is_pavrus_brand(u)]
     log(f"ℹ️ Этап 1: всего ссылок /catalog/: {len(urls)}")
     log(f" После фильтра по бренду PAVRUS: {len(pavrus_urls)} ссылок")
@@ -376,7 +379,7 @@ def generate_article(title, desc, body, url):
         return article
     
     # Попытка 2: упрощённая статья (800-1500 симв.)
-    log("️ Не удалось создать полную статью — пробую упрощённую версию")
+    log("⚠️ Не удалось создать полную статью — пробую упрощённую версию")
     prompt_short = (
         f"Напиши статью о товаре PAVRUS «{title}».\n"
         f"Описание: {desc}\n"
@@ -453,7 +456,7 @@ def main():
     
     urls = fetch_sitemap()
     if not urls:
-        log(" Не удалось получить ссылки PAVRUS с сайта")
+        log("❌ Не удалось получить ссылки PAVRUS с сайта")
         sys.exit(1)
     
     page, title, desc, body = pick_page(urls, hist)
