@@ -1,5 +1,9 @@
 # -*- coding: utf-8 -*-
-import os, re, json, random, sys, time, datetime, requests, html, base64, uuid
+import os, re, json, random, sys, time, datetime, requests, html, base64, uuid, smtplib
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
+from email.mime.base import MIMEBase
+from email import encoders
 import warnings
 from requests.packages.urllib3.exceptions import InsecureRequestWarning
 warnings.simplefilter('ignore', InsecureRequestWarning)
@@ -10,10 +14,18 @@ try:
 except ImportError:
     DOCX_OK = False
 
+# ИИ-ключи
 GIGACHAT_CLIENT_ID = os.environ.get("GIGACHAT_CLIENT_ID", "").strip()
 GIGACHAT_CLIENT_SECRET = os.environ.get("GIGACHAT_CLIENT_SECRET", "").strip()
 GIGACHAT_SCOPE = os.environ.get("GIGACHAT_SCOPE", "GIGACHAT_API_PERS").strip()
 GIGACHAT_MODEL = os.environ.get("GIGACHAT_MODEL", "GigaChat-Pro").strip()
+
+# SMTP-настройки
+SMTP_HOST = os.environ.get("SMTP_HOST", "").strip()
+SMTP_PORT = os.environ.get("SMTP_PORT", "587").strip()
+SMTP_USER = os.environ.get("SMTP_USER", "").strip()
+SMTP_PASS = os.environ.get("SMTP_PASS", "").strip()
+EMAIL_TO = os.environ.get("EMAIL_TO", "").strip()
 
 SITE = "https://pavrus.ru"
 SITEMAP = SITE + "/sitemap.xml"
@@ -94,10 +106,10 @@ CATEGORY_SEEDS = [
 def log(msg):
     print(msg, flush=True)
 
-log("Версия ℹ️ pavrus-articles-agent v12 (ТОЛЬКО DOCX: ссылка → СТАТЬЯ → обычный заголовок → текст со стилевыми подзаголовками; новость аналогично)")
+log("Версия ℹ️ pavrus-articles-agent v13 (отправка на корпоративную почту + GigaChat OAuth)")
 
 # ============================================================
-# GigaChat: OAuth + чат с ретраем
+# GigaChat: OAuth + чат
 # ============================================================
 
 _GIGACHAT_TOKEN = None
@@ -172,7 +184,7 @@ def ai_gigachat(prompt, minlen):
     return None
 
 # ============================================================
-# САНИТАЗАЦИЯ И ОБРЕЗКА
+# САНИТИЗАЦИЯ И ОБРЕЗКА
 # ============================================================
 
 def sanitize_ai_html(text):
@@ -337,7 +349,7 @@ def pick_page(urls, hist):
     return None, "", "", ""
 
 # ============================================================
-# ЗАГОЛОВКИ + ПОДЗАГОЛОВКИ (один запрос ИИ, 8 строк)
+# ЗАГОЛОВКИ + ПОДЗАГОЛОВКИ
 # ============================================================
 
 def generate_headings_and_titles(title, desc, seeds):
@@ -464,7 +476,7 @@ def generate_news_from_article(article, title, hd):
     return f"<p>{text}</p><h2>Где узнать больше</h2><p>Подробнее — у специалистов PAVRUS.</p>"
 
 # ============================================================
-# DOCX — ЕДИНСТВЕННЫЙ ФОРМАТ ВЫВОДА
+# СОЗДАНИЕ DOCX
 # ============================================================
 
 def html_to_lines(text):
@@ -492,18 +504,62 @@ def create_docx(title, article_title, news_title, article, news, url, date_str, 
     doc.add_paragraph(f"Дата: {date_str}")
     doc.add_paragraph(f"Ссылка: {url}")
     doc.add_paragraph("")
-    doc.add_paragraph("СТАТЬЯ")                 # обычным стилем
-    doc.add_paragraph(article_title)            # обычным стилем, без выделения
-    add_body(doc, article)                      # подзаголовки — стилевые
+    doc.add_paragraph("СТАТЬЯ")
+    doc.add_paragraph(article_title)
+    add_body(doc, article)
     doc.add_page_break()
-    doc.add_paragraph("НОВОСТЬ")                # обычным стилем
-    doc.add_paragraph(news_title)               # обычным стилем, без выделения
-    add_body(doc, news)                         # 1-2 подзаголовка — стилевые
+    doc.add_paragraph("НОВОСТЬ")
+    doc.add_paragraph(news_title)
+    add_body(doc, news)
     os.makedirs("articles_output", exist_ok=True)
     path = f"articles_output/{date_str}_{slug}.docx"
     doc.save(path)
     log(f"✅ DOCX создан: {path}")
     return path
+
+# ============================================================
+# ОТПРАВКА НА ПОЧТУ
+# ============================================================
+
+def send_email(subject, body_text, attachment_path):
+    """Отправляет письмо с вложением DOCX."""
+    if not SMTP_HOST or not SMTP_USER or not SMTP_PASS or not EMAIL_TO:
+        log("⚠️ SMTP-настройки не заданы — пропуск отправки на почту")
+        return False
+    
+    try:
+        msg = MIMEMultipart()
+        msg['From'] = SMTP_USER
+        msg['To'] = EMAIL_TO
+        msg['Subject'] = subject
+        
+        msg.attach(MIMEText(body_text, 'plain', 'utf-8'))
+        
+        if os.path.exists(attachment_path):
+            with open(attachment_path, "rb") as f:
+                part = MIMEBase('application', 'octet-stream')
+                part.set_payload(f.read())
+            encoders.encode_base64(part)
+            filename = os.path.basename(attachment_path)
+            part.add_header('Content-Disposition', f'attachment; filename="{filename}"')
+            msg.attach(part)
+        
+        port = int(SMTP_PORT)
+        if port == 465:
+            server = smtplib.SMTP_SSL(SMTP_HOST, port, timeout=30)
+        else:
+            server = smtplib.SMTP(SMTP_HOST, port, timeout=30)
+            server.starttls()
+        
+        server.login(SMTP_USER, SMTP_PASS)
+        server.send_message(msg)
+        server.quit()
+        
+        log(f"✅ Письмо отправлено на {EMAIL_TO}")
+        return True
+    except Exception as e:
+        log(f"❌ Ошибка отправки письма: {e}")
+        return False
 
 # ============================================================
 # ГЛАВНАЯ ЛОГИКА
@@ -562,7 +618,22 @@ def main():
         log("❌ DOCX не создан — выход")
         sys.exit(1)
 
-    log("✅ FINISH: DOCX со статьёй и новостью готов к ручной публикации!")
+    # Отправка на почту
+    subject = f"PAVRUS: {title} — статья и новость {date_str}"
+    body = (f"Добрый день!\n\n"
+            f"Сгенерирована статья о товаре PAVRUS.\n\n"
+            f"Товар: {title}\n"
+            f"Ссылка: {page}\n\n"
+            f"Заголовок статьи: {hd['article_title']}\n"
+            f"Заголовок новости: {hd['news_title']}\n\n"
+            f"Длина статьи: {len(article)} симв.\n"
+            f"Длина новости: {len(news)} симв.\n\n"
+            f"Во вложении — DOCX со статьёй и новостью для ручной публикации.\n\n"
+            f"С уважением,\nPAVRUS Articles Agent")
+    
+    send_email(subject, body, docx_path)
+
+    log("✅ FINISH: статья + новость отправлены на почту!")
 
 if __name__ == "__main__":
     try:
