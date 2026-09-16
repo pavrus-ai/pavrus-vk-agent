@@ -22,6 +22,10 @@ UA = {"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/1
 
 BRAND_SLUG = "pavrus"
 
+EMOJI_RE = re.compile(
+    "[\U0001F300-\U0001FAFF\U00002600-\U000027BF\U0001F000-\U0001F02F\u2B00-\u2BFF\uFE0F]",
+    flags=re.UNICODE)
+
 JUNK_PATTERNS = [
     r"Санкт-Петербург|Москва|Новосибирск|Краснодар|Красноярск",
     r"Войти|Выйти|Регистрация|Личный кабинет",
@@ -32,83 +36,32 @@ JUNK_PATTERNS = [
     r"корзин|кабинет|избранн|сравнени",
 ]
 
-# ============================================================
-# БИБЛИОТЕКА ЗАТРАВОК ДЛЯ ГЕНЕРАЦИИ ПОДЗАГОЛОВКОВ
-# ============================================================
-
 HEADING_SEEDS = {
-    "what_is": [
-        "Что представляет собой устройство",
-        "Принцип работы устройства",
-        "Техническая справка",
-        "Общее описание",
-        "Анатомия решения",
-        "Знакомство с устройством",
-        "Главное о продукте",
-        "Для чего создано устройство"
-    ],
-    "purpose": [
-        "Сценарии применения",
-        "Место в AV-инсталляции",
-        "Роль и задачи устройства",
-        "Области интеграции",
-        "Целевые объекты",
-        "Для кого создано это решение",
-        "Ищем точку приложения",
-        "Практическое применение"
-    ],
-    "features": [
-        "Матрица технических характеристик",
-        "Функциональные возможности",
-        "Варианты подключения и интерфейсы",
-        "Полный разбор возможностей",
-        "Логика работы решения",
-        "Полезный функционал",
-        "Ключевые возможности",
-        "Технические особенности"
-    ],
-    "advantages": [
-        "Конструктивные преимущества",
-        "Отличительные инженерные решения",
-        "Почему эта модель выигрывает",
-        "Схемотехника и надежность",
-        "Конкурентные отличия",
-        "Важнейшие детали устройства",
-        "Преимущественные фишки",
-        "Уникальные технологии"
-    ],
-    "usage": [
-        "Рекомендации по использованию",
-        "Требования к монтажу",
-        "Особенности эксплуатации",
-        "Практические советы",
-        "Лайфхаки по применению",
-        "Быстрый старт",
-        "Настраиваем устройство",
-        "Способы инсталляции"
-    ],
-    "conclusion": [
-        "Технические выводы",
-        "Экспертное заключение",
-        "Реальное применение",
-        "Устройство стоит своих денег",
-        "Честный вердикт",
-        "Переход на новый уровень",
-        "Следующий шаг клиента",
-        "Эффективность применения"
-    ]
+    "what_is": ["Что представляет собой устройство", "Принцип работы устройства",
+                "Техническая справка", "Общее описание", "Анатомия решения",
+                "Знакомство с устройством", "Главное о продукте", "Для чего создано устройство"],
+    "purpose": ["Сценарии применения", "Место в AV-инсталляции", "Роль и задачи устройства",
+                "Области интеграции", "Целевые объекты", "Для кого создано это решение",
+                "Ищем точку приложения", "Практическое применение"],
+    "features": ["Матрица технических характеристик", "Функциональные возможности",
+                 "Варианты подключения и интерфейсы", "Полный разбор возможностей",
+                 "Логика работы решения", "Полезный функционал", "Ключевые возможности",
+                 "Технические особенности"],
+    "advantages": ["Конструктивные преимущества", "Отличительные инженерные решения",
+                   "Почему эта модель выигрывает", "Схемотехника и надежность",
+                   "Конкурентные отличия", "Важнейшие детали устройства",
+                   "Преимущественные фишки", "Уникальные технологии"],
+    "usage": ["Рекомендации по использованию", "Требования к монтажу",
+              "Особенности эксплуатации", "Практические советы", "Лайфхаки по применению",
+              "Быстрый старт", "Настраиваем устройство", "Способы инсталляции"],
+    "conclusion": ["Технические выводы", "Экспертное заключение", "Реальное применение",
+                   "Устройство стоит своих денег", "Честный вердикт",
+                   "Переход на новый уровень", "Следующий шаг клиента",
+                   "Эффективность применения"],
 }
 
 def select_seeds():
-    """Выбирает случайные затравки для каждого раздела."""
-    return {
-        "what_is": random.choice(HEADING_SEEDS["what_is"]),
-        "purpose": random.choice(HEADING_SEEDS["purpose"]),
-        "features": random.choice(HEADING_SEEDS["features"]),
-        "advantages": random.choice(HEADING_SEEDS["advantages"]),
-        "usage": random.choice(HEADING_SEEDS["usage"]),
-        "conclusion": random.choice(HEADING_SEEDS["conclusion"])
-    }
+    return {k: random.choice(v) for k, v in HEADING_SEEDS.items()}
 
 CATEGORY_SEEDS = [
     "https://pavrus.ru/catalog/pavrus-sistema-golosovaniya/",
@@ -141,10 +94,10 @@ CATEGORY_SEEDS = [
 def log(msg):
     print(msg, flush=True)
 
-log("Версия ℹ️ pavrus-articles-agent v9 (ИИ-генерация уникальных подзаголовков + GigaChat OAuth + DOCX)")
+log("Версия ℹ️ pavrus-articles-agent v10 (санитизация HTML + обрезка по секциям + ретрай таймаутов)")
 
 # ============================================================
-# GigaChat: OAuth 2.0
+# GigaChat: OAuth + чат с ретраем
 # ============================================================
 
 _GIGACHAT_TOKEN = None
@@ -153,7 +106,7 @@ _GIGACHAT_TOKEN_EXPIRY = 0
 def get_gigachat_token():
     global _GIGACHAT_TOKEN, _GIGACHAT_TOKEN_EXPIRY
     if not GIGACHAT_CLIENT_ID or not GIGACHAT_CLIENT_SECRET:
-        log("⚠️ GigaChat: GIGACHAT_CLIENT_ID / GIGACHAT_CLIENT_SECRET не заданы")
+        log("⚠️ GigaChat: ключи не заданы")
         return None
     if _GIGACHAT_TOKEN and time.time() < _GIGACHAT_TOKEN_EXPIRY:
         return _GIGACHAT_TOKEN
@@ -163,8 +116,7 @@ def get_gigachat_token():
             headers={"Authorization": f"Basic {credentials}",
                      "RqUID": str(uuid.uuid4()),
                      "Content-Type": "application/x-www-form-urlencoded"},
-            data={"scope": GIGACHAT_SCOPE},
-            timeout=30, verify=False)
+            data={"scope": GIGACHAT_SCOPE}, timeout=30, verify=False)
         log(f"ℹ️ GigaChat OAuth: статус {r.status_code} (scope={GIGACHAT_SCOPE})")
         if r.status_code != 200:
             log(f"⚠️ GigaChat OAuth тело: {r.text[:300]}")
@@ -173,33 +125,37 @@ def get_gigachat_token():
         if "access_token" in j:
             _GIGACHAT_TOKEN = j["access_token"]
             _GIGACHAT_TOKEN_EXPIRY = time.time() + 1700
-            log("✅ GigaChat: токен получен (действует 30 мин)")
+            log("✅ GigaChat: токен получен (30 мин)")
             return _GIGACHAT_TOKEN
-        log(f"⚠️ GigaChat OAuth: нет access_token в ответе: {str(j)[:200]}")
     except Exception as e:
         log(f"⚠️ GigaChat auth error: {e}")
     return None
 
 def gigachat_chat(prompt, model):
+    """Один запрос к GigaChat с 1 ретраем при таймауте."""
     token = get_gigachat_token()
     if not token:
         return None
-    try:
-        r = requests.post("https://gigachat.devices.sberbank.ru/api/v1/chat/completions",
-            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
-            json={"model": model, "temperature": 0.7, "max_tokens": 4000,
-                  "messages": [{"role": "user",
-                                "content": prompt + "\n\nВАЖНО: Пиши ТОЛЬКО на русском языке."}]},
-            timeout=120, verify=False)
-        if r.status_code != 200:
-            log(f"⚠️ GigaChat chat [{model}]: статус {r.status_code}: {r.text[:200]}")
-            return None
-        res = r.json()["choices"][0]["message"]["content"].strip()
-        log(f"✅ GigaChat [{model}]: ответ {len(res)} симв.")
-        return res
-    except Exception as e:
-        log(f"⚠️ GigaChat chat [{model}] error: {e}")
-        return None
+    for attempt in range(2):
+        try:
+            r = requests.post("https://gigachat.devices.sberbank.ru/api/v1/chat/completions",
+                headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+                json={"model": model, "temperature": 0.7, "max_tokens": 4000,
+                      "messages": [{"role": "user",
+                                    "content": prompt + "\n\nВАЖНО: Пиши ТОЛЬКО на русском языке."}]},
+                timeout=120, verify=False)
+            if r.status_code != 200:
+                log(f"⚠️ GigaChat chat [{model}]: статус {r.status_code}: {r.text[:200]}")
+                return None
+            res = r.json()["choices"][0]["message"]["content"].strip()
+            log(f"✅ GigaChat [{model}]: ответ {len(res)} симв.")
+            return res
+        except Exception as e:
+            log(f"⚠️ GigaChat [{model}] попытка {attempt+1}: {str(e)[:150]}")
+            if attempt == 0:
+                log("⏳ Пауза 10 сек и повтор...")
+                time.sleep(10)
+    return None
 
 def ai_gigachat(prompt, minlen):
     models = [GIGACHAT_MODEL, "GigaChat:latest"]
@@ -215,6 +171,66 @@ def ai_gigachat(prompt, minlen):
         if res:
             log(f"⚠️ GigaChat [{mdl}]: коротко ({len(res)} симв., нужно ≥{minlen})")
     return None
+
+# ============================================================
+# САНИТИЗАЦИЯ И ОБРЕЗКА ВЫВОДА ИИ
+# ============================================================
+
+def sanitize_ai_html(text):
+    """Приводит вывод ИИ к чистому HTML: без markdown, эмодзи, id-атрибутов."""
+    t = text.replace("```html", "").replace("```", "")
+    t = re.sub(r"^#{1,2}\s*(.+)$", r"<h2>\1</h2>", t, flags=re.M)
+    t = re.sub(r"^#{3,6}\s*(.+)$", r"<h3>\1</h3>", t, flags=re.M)
+    t = re.sub(r"<(h[1-4])[^>]*>", r"<\1>", t, flags=re.I)   # убираем id/class
+    t = t.replace("**", "").replace("__", "")
+    t = EMOJI_RE.sub("", t)
+    parts = re.split(r"(<h[23]>.*?</h[23]>)", t, flags=re.S)
+    out = []
+    for p in parts:
+        p = p.strip()
+        if not p:
+            continue
+        if p.startswith("<h2>") or p.startswith("<h3>"):
+            out.append(p)
+        else:
+            p = re.sub(r"</?p[^>]*>", "\n", p)
+            for chunk in p.split("\n"):
+                chunk = " ".join(chunk.split())
+                if len(chunk) > 3:
+                    out.append(f"<p>{chunk}</p>")
+    # убираем первый h2-«титул» вида «Статья про...» / «Экспертная статья...»
+    if out and out[0].startswith("<h2>"):
+        low = out[0].lower()
+        if "статья" in low or "эксперт" in low or "обзор" in low:
+            out = out[1:]
+    return "\n".join(out)
+
+def trim_article(article, max_len=2600):
+    """Обрезает статью по границам секций <h2>, сохраняя заключение."""
+    if len(article) <= max_len:
+        return article
+    sections = re.split(r"(?=<h2>)", article)
+    if len(sections) <= 2:
+        cut = article[:max_len]
+        i = cut.rfind("</p>")
+        return cut[:i+4] if i != -1 else cut
+    first, last = sections[0], sections[-1]
+    middle = sections[1:-1]
+    kept = [first]
+    total = len(first) + len(last)
+    for s in middle:
+        if total + len(s) > max_len:
+            break
+        kept.append(s)
+        total += len(s)
+    result = "".join(kept) + last
+    if len(result) > max_len:
+        cut = result[:max_len]
+        i = cut.rfind("</p>")
+        if i != -1:
+            result = cut[:i+4]
+    log(f"✂️ Статья обрезана по секциям: {len(article)} → {len(result)} симв.")
+    return result
 
 # ============================================================
 # ПАРСИНГ САЙТА
@@ -313,78 +329,46 @@ def pick_page(urls, hist):
                 log(f"⚠️ Попытка {attempt+1}: мало текста — {page}")
                 continue
             log(f"✅ Этап 2: товар PAVRUS «{h1[:70]}» — {page}")
-            log(f"   Описание: {desc[:100]}")
             return page, h1, desc, body
         except Exception as e:
             log(f"⚠️ Попытка {attempt+1} ошибка: {e}")
     return None, "", "", ""
 
 # ============================================================
-# ГЕНЕРАЦИЯ УНИКАЛЬНЫХ ПОДЗАГОЛОВКОВ ЧЕРЕЗ ИИ
+# ГЕНЕРАЦИЯ ПОДЗАГОЛОВКОВ, СТАТЬИ, НОВОСТИ
 # ============================================================
 
 def generate_headings(title, desc, seeds):
-    """ИИ генерирует 6 уникальных развёрнутых подзаголовков на основе затравок."""
     prompt = (
         f"Ты — эксперт по профессиональному AV-оборудованию PAVRUS. "
-        f"На основе коротких фраз-затравок придумай 6 УНИКАЛЬНЫХ развёрнутых подзаголовков (5-10 слов каждый) "
+        f"На основе фраз-затравок придумай 6 УНИКАЛЬНЫХ развёрнутых подзаголовков (5-10 слов) "
         f"для статьи о конкретном товаре.\n\n"
-        f"ТОВАР: {title}\n"
-        f"ОПИСАНИЕ: {desc}\n\n"
-        f"ЗАТРАВКИ (разверни каждую в красивый подзаголовок, релевантный именно этому товару):\n"
-        f"1. {seeds['what_is']} → подзаголовок для раздела «Что это»\n"
-        f"2. {seeds['purpose']} → подзаголовок для раздела «Назначение»\n"
-        f"3. {seeds['features']} → подзаголовок для раздела «Возможности»\n"
-        f"4. {seeds['advantages']} → подзаголовок для раздела «Преимущества»\n"
-        f"5. {seeds['usage']} → подзаголовок для раздела «Использование»\n"
-        f"6. {seeds['conclusion']} → подзаголовок для раздела «Заключение»\n\n"
-        f"ТРЕБОВАНИЯ:\n"
-        f"1. Каждый подзаголовок: 5-10 слов, конкретный, профессиональный.\n"
-        f"2. Обязательно упоминай название товара или его ключевую особенность.\n"
-        f"3. Не используй слова «инновационный», «революционный» без конкретики.\n"
-        f"4. Формат ответа СТРОГО (6 строк, без нумерации, без лишних слов):\n"
-        f"подзаголовок 1\n"
-        f"подзаголовок 2\n"
-        f"подзаголовок 3\n"
-        f"подзаголовок 4\n"
-        f"подзаголовок 5\n"
-        f"подзаголовок 6\n"
+        f"ТОВАР: {title}\nОПИСАНИЕ: {desc}\n\n"
+        f"ЗАТРАВКИ:\n"
+        f"1. {seeds['what_is']}\n2. {seeds['purpose']}\n3. {seeds['features']}\n"
+        f"4. {seeds['advantages']}\n5. {seeds['usage']}\n6. {seeds['conclusion']}\n\n"
+        f"ТРЕБОВАНИЯ: каждый подзаголовок 5-10 слов, конкретный, упоминает товар или его особенность. "
+        f"Формат ответа СТРОГО 6 строк без нумерации и лишних слов.\n"
     )
-    
     result = gigachat_chat(prompt, GIGACHAT_MODEL or "GigaChat:latest")
     if not result:
-        log("⚠️ Не удалось сгенерировать подзаголовки — использую затравки как есть")
+        log("⚠️ Подзаголовки не сгенерированы — использую затравки")
         return seeds
-    
-    lines = [l.strip() for l in result.split('\n') if l.strip()]
+    lines = [l.strip() for l in result.split("\n") if l.strip()]
     if len(lines) < 6:
-        log(f"⚠️ ИИ вернул только {len(lines)} подзаголовков — использую затравки")
+        log("⚠️ Мало строк подзаголовков — использую затравки")
         return seeds
-    
-    headings = {
-        "what_is": lines[0][:80],
-        "purpose": lines[1][:80],
-        "features": lines[2][:80],
-        "advantages": lines[3][:80],
-        "usage": lines[4][:80],
-        "conclusion": lines[5][:80]
-    }
-    
+    headings = {k: EMOJI_RE.sub("", lines[i]).replace("**", "")[:80]
+                for i, k in enumerate(["what_is", "purpose", "features",
+                                       "advantages", "usage", "conclusion"])}
     log("📝 Сгенерированные подзаголовки:")
-    for key, val in headings.items():
-        log(f"   • {val}")
-    
+    for v in headings.values():
+        log(f"   • {v}")
     return headings
 
-# ============================================================
-# ГЕНЕРАЦИЯ СТАТЬИ
-# ============================================================
-
 def generate_article(title, desc, body, url):
-    """Генерирует статью с ИИ-подзаголовками."""
     seeds = select_seeds()
     headings = generate_headings(title, desc, seeds)
-    
     prompt = (
         f"Напиши развёрнутую экспертную статью о профессиональном AV-оборудовании PAVRUS.\n\n"
         f"НАЗВАНИЕ ТОВАРА: {title}\n"
@@ -393,75 +377,69 @@ def generate_article(title, desc, body, url):
         f"ССЫЛКА НА ТОВАР: {url}\n\n"
         f"ТРЕБОВАНИЯ К СТАТЬЕ:\n"
         f"1. Язык: ТОЛЬКО русский.\n"
-        f"2. Длина: СТРОГО 1800-2500 символов.\n"
-        f"3. Формат: HTML-разметка (<h2> для разделов, <h3> для подразделов, <p> для абзацев).\n"
-        f"4. ОБЯЗАТЕЛЬНАЯ СТРУКТУРА (используй ИМЕННО ЭТИ подзаголовки):\n"
-        f"   <h2>{headings['what_is']}</h2>\n"
-        f"   <p>2-3 абзаца: общее описание, место в линейке PAVRUS, для каких задач создано.</p>\n"
-        f"   <h2>{headings['purpose']}</h2>\n"
-        f"   <p>2-3 абзаца: для чего используется, где применяется, целевые объекты.</p>\n"
-        f"   <h2>{headings['features']}</h2>\n"
-        f"   <p>2-3 абзаца: подробно о ключевых параметрах, что они дают на практике.</p>\n"
-        f"   <h2>{headings['advantages']}</h2>\n"
-        f"   <p>2 абзаца: чем отличается от аналогов, надёжность, уникальные технологии.</p>\n"
-        f"   <h2>{headings['usage']}</h2>\n"
-        f"   <p>1-2 абзаца: советы по установке, настройке, эксплуатации.</p>\n"
-        f"   <h2>{headings['conclusion']}</h2>\n"
-        f"   <p>1 абзац: итог, реальная эффективность, призыв обратиться к специалистам PAVRUS.</p>\n"
-        f"5. Стиль: эксперт по AV-оборудованию с 10-летним опытом, живо и конкретно, без воды.\n"
-        f"6. Не выдумывай характеристики, которых нет в исходных данных.\n"
-        f"7. В последнем абзаце обязательно: «По всем вопросам обращайтесь к специалистам компании PAVRUS».\n"
-        f"8. НЕ добавляй внешних ссылок кроме {url}.\n"
+        f"2. Длина: СТРОГО 1800-2500 символов. Длиннее 2600 — грубая ошибка!\n"
+        f"3. Формат: ТОЛЬКО чистый HTML: <h2> разделы, <p> абзацы. БЕЗ markdown, БЕЗ ##, БЕЗ эмодзи, БЕЗ id-атрибутов.\n"
+        f"4. НЕ пиши вводный титул-заголовок — начинай сразу с первого <h2>.\n"
+        f"5. СТРУКТУРА (именно эти подзаголовки):\n"
+        f"   <h2>{headings['what_is']}</h2> — 2 абзаца\n"
+        f"   <h2>{headings['purpose']}</h2> — 2 абзаца\n"
+        f"   <h2>{headings['features']}</h2> — 2 абзаца\n"
+        f"   <h2>{headings['advantages']}</h2> — 1-2 абзаца\n"
+        f"   <h2>{headings['usage']}</h2> — 1 абзац\n"
+        f"   <h2>{headings['conclusion']}</h2> — 1 абзац\n"
+        f"6. Стиль: эксперт по AV-оборудованию, живо и конкретно, без воды.\n"
+        f"7. Не выдумывай характеристики, которых нет в исходных данных.\n"
+        f"8. В последнем абзаце: «По всем вопросам обращайтесь к специалистам компании PAVRUS».\n"
     )
-    
-    article = ai_gigachat(prompt, minlen=1800)
-    if article:
-        return article
-    
-    log("⚠️ Объёмная статья не получилась — вторая попытка с упрощённым промптом")
-    prompt2 = (
-        f"Статья о товаре PAVRUS «{title}». Описание: {desc}. Характеристики: {body[:500]}.\n"
-        f"1500-2000 символов, HTML (<h2>, <p>). Используй эти подзаголовки:\n"
-        f"- {headings['what_is']}\n"
-        f"- {headings['purpose']}\n"
-        f"- {headings['features']}\n"
-        f"- {headings['advantages']}\n"
-        f"- {headings['usage']}\n"
-        f"- {headings['conclusion']}\n"
-        f"В конце: «По всем вопросам обращайтесь к специалистам компании PAVRUS»."
-    )
-    return ai_gigachat(prompt2, minlen=1500)
+    article = ai_gigachat(prompt, minlen=1500)
+    if not article:
+        log("⚠️ Объёмная статья не получилась — вторая попытка")
+        prompt2 = (
+            f"Статья о товаре PAVRUS «{title}». Описание: {desc}. Характеристики: {body[:500]}.\n"
+            f"1500-2200 символов, чистый HTML (<h2>, <p>), без markdown и эмодзи. Подзаголовки:\n"
+            f"- {headings['what_is']}\n- {headings['purpose']}\n- {headings['features']}\n"
+            f"- {headings['advantages']}\n- {headings['usage']}\n- {headings['conclusion']}\n"
+            f"В конце: «По всем вопросам обращайтесь к специалистам компании PAVRUS»."
+        )
+        article = ai_gigachat(prompt2, minlen=1200)
+    if not article:
+        return None
+    article = sanitize_ai_html(article)
+    article = trim_article(article, 2600)
+    return article
 
 def generate_news_from_article(article, title, url):
     plain = re.sub(r"<[^>]+>", " ", article)
     plain = re.sub(r"\s+", " ", plain).strip()
-    
     prompt = (
-        f"Сожми статью в короткую новость.\n\nСТАТЬЯ:\n{plain[:1800]}\n\n"
-        f"ТОВАР: {title}\n\n"
+        f"Сожми статью в короткую новость.\n\nСТАТЬЯ:\n{plain[:1800]}\n\nТОВАР: {title}\n\n"
         f"ТРЕБОВАНИЯ:\n"
         f"1. ТОЛЬКО русский язык.\n"
         f"2. Длина СТРОГО 500-700 символов.\n"
-        f"3. Формат: <h2>Заголовок</h2> + 2-3 абзаца <p>.\n"
+        f"3. Формат: ТОЛЬКО чистый HTML: <h2>Заголовок</h2> и 2-3 <p>. БЕЗ markdown, БЕЗ ##, БЕЗ эмодзи.\n"
         f"4. Содержание: что за товар, главное применение, ключевая особенность.\n"
         f"5. В конце: «Подробнее — у специалистов PAVRUS».\n"
-        f"6. Стиль: живой новостной анонс.\n"
     )
-    
-    news = ai_gigachat(prompt, minlen=450)
+    news = ai_gigachat(prompt, minlen=400)
     if news:
+        news = sanitize_ai_html(news)
         if len(news) > 800:
-            news = news[:800].rsplit(".", 1)[0] + "."
+            news = news[:800].rsplit("</p>", 1)[0] + "</p>"
         return news
-    
-    log("⚠️ Новость не сжалась — беру первые предложения статьи")
-    sentences = plain.split(". ")
+    log("⚠️ Новость не сжалась — собираю из первых предложений статьи")
+    sentences = re.split(r"(?<=\.)\s+", plain)
     out = []
     for s in sentences:
-        out.append(s.strip() + ".")
-        if len(". ".join(out)) > 550:
+        s = s.strip()
+        if len(s) < 20:
+            continue
+        out.append(s)
+        if len(" ".join(out)) >= 550:
             break
-    return f"<h2>{title}</h2><p>{'. '.join(out)}</p><p>Подробнее — у специалистов PAVRUS.</p>"
+    text = " ".join(out)
+    if len(text) > 700:
+        text = text[:700].rsplit(".", 1)[0] + "."
+    return f"<h2>{title}</h2><p>{text}</p><p>Подробнее — у специалистов PAVRUS.</p>"
 
 # ============================================================
 # DOCX
@@ -570,7 +548,6 @@ def main():
         f.write(f"ТОВАР PAVRUS: {title}\nССЫЛКА: {page}\n\n=== СТАТЬЯ ===\n{article}\n\n=== НОВОСТЬ ===\n{news}")
 
     create_docx(title, article, news, page, date_str, slug)
-
     log("✅ FINISH: статья + новость + DOCX готовы к ручной публикации!")
 
 if __name__ == "__main__":
