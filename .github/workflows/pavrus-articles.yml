@@ -2,7 +2,7 @@ name: Pavrus Articles Agent
 
 on:
   schedule:
-    - cron: "0 7 */10 * *"   # 07:00 UTC = 14:00 Новосибирск, каждые 10 дней
+    - cron: "0 7 */10 * *"
   workflow_dispatch:
 
 permissions:
@@ -20,17 +20,22 @@ jobs:
 
       - run: pip install requests python-docx
 
-      - name: Generate article and news (DOCX only)
+      - name: Generate and send to email
         run: python pavrus-articles-agent.py
         env:
           GIGACHAT_CLIENT_ID: ${{ secrets.GIGACHAT_CLIENT_ID }}
           GIGACHAT_CLIENT_SECRET: ${{ secrets.GIGACHAT_CLIENT_SECRET }}
           GIGACHAT_SCOPE: ${{ secrets.GIGACHAT_SCOPE }}
           GIGACHAT_MODEL: ${{ secrets.GIGACHAT_MODEL }}
+          SMTP_HOST: ${{ secrets.SMTP_HOST }}
+          SMTP_PORT: ${{ secrets.SMTP_PORT }}
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASS: ${{ secrets.SMTP_PASS }}
+          EMAIL_TO: ${{ secrets.EMAIL_TO }}
 
-      - name: Commit DOCX
+      - name: Commit history only
         run: |
           git config --global user.name "pavrus-agent"
           git config --global user.email "pavrus-ai@users.noreply.github.com"
-          git add articles_output/ articles_history.json || true
-          git diff --staged --quiet || (git commit -m "chore: new PAVRUS article DOCX [skip ci]" && git push)
+          git add articles_history.json || true
+          git diff --staged --quiet || (git commit -m "chore: update history [skip ci]" && git push)
