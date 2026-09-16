@@ -1,0 +1,36 @@
+name: Pavrus Articles Agent
+
+on:
+  schedule:
+    - cron: "0 7 */10 * *"   # 07:00 UTC = 14:00 Новосибирск, каждые 10 дней
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  generate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - run: pip install requests python-docx
+
+      - name: Generate article and news
+        run: python pavrus-articles-agent.py
+        env:
+          GIGACHAT_CLIENT_ID: ${{ secrets.GIGACHAT_CLIENT_ID }}
+          GIGACHAT_CLIENT_SECRET: ${{ secrets.GIGACHAT_CLIENT_SECRET }}
+          GIGACHAT_SCOPE: ${{ secrets.GIGACHAT_SCOPE }}
+          GIGACHAT_MODEL: ${{ secrets.GIGACHAT_MODEL }}
+
+      - name: Commit articles
+        run: |
+          git config --global user.name "pavrus-agent"
+          git config --global user.email "pavrus-ai@users.noreply.github.com"
+          git add articles_output/ articles_history.json || true
+          git diff --staged --quiet || (git commit -m "chore: new article and news PAVRUS [skip ci]" && git push)
