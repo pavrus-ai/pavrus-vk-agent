@@ -94,7 +94,7 @@ CATEGORY_SEEDS = [
 def log(msg):
     print(msg, flush=True)
 
-log("Версия ℹ️ pavrus-articles-agent v10 (санитизация HTML + обрезка по секциям + ретрай таймаутов)")
+log("Версия ℹ️ pavrus-articles-agent v12 (ТОЛЬКО DOCX: ссылка → СТАТЬЯ → обычный заголовок → текст со стилевыми подзаголовками; новость аналогично)")
 
 # ============================================================
 # GigaChat: OAuth + чат с ретраем
@@ -132,7 +132,6 @@ def get_gigachat_token():
     return None
 
 def gigachat_chat(prompt, model):
-    """Один запрос к GigaChat с 1 ретраем при таймауте."""
     token = get_gigachat_token()
     if not token:
         return None
@@ -173,15 +172,14 @@ def ai_gigachat(prompt, minlen):
     return None
 
 # ============================================================
-# САНИТИЗАЦИЯ И ОБРЕЗКА ВЫВОДА ИИ
+# САНИТАЗАЦИЯ И ОБРЕЗКА
 # ============================================================
 
 def sanitize_ai_html(text):
-    """Приводит вывод ИИ к чистому HTML: без markdown, эмодзи, id-атрибутов."""
     t = text.replace("```html", "").replace("```", "")
     t = re.sub(r"^#{1,2}\s*(.+)$", r"<h2>\1</h2>", t, flags=re.M)
     t = re.sub(r"^#{3,6}\s*(.+)$", r"<h3>\1</h3>", t, flags=re.M)
-    t = re.sub(r"<(h[1-4])[^>]*>", r"<\1>", t, flags=re.I)   # убираем id/class
+    t = re.sub(r"<(h[1-4])[^>]*>", r"<\1>", t, flags=re.I)
     t = t.replace("**", "").replace("__", "")
     t = EMOJI_RE.sub("", t)
     parts = re.split(r"(<h[23]>.*?</h[23]>)", t, flags=re.S)
@@ -198,7 +196,6 @@ def sanitize_ai_html(text):
                 chunk = " ".join(chunk.split())
                 if len(chunk) > 3:
                     out.append(f"<p>{chunk}</p>")
-    # убираем первый h2-«титул» вида «Статья про...» / «Экспертная статья...»
     if out and out[0].startswith("<h2>"):
         low = out[0].lower()
         if "статья" in low or "эксперт" in low or "обзор" in low:
@@ -206,7 +203,6 @@ def sanitize_ai_html(text):
     return "\n".join(out)
 
 def trim_article(article, max_len=2600):
-    """Обрезает статью по границам секций <h2>, сохраняя заключение."""
     if len(article) <= max_len:
         return article
     sections = re.split(r"(?=<h2>)", article)
@@ -231,6 +227,12 @@ def trim_article(article, max_len=2600):
             result = cut[:i+4]
     log(f"✂️ Статья обрезана по секциям: {len(article)} → {len(result)} симв.")
     return result
+
+def clean_plain(s):
+    s = re.sub(r"<[^>]+>", " ", s)
+    s = s.replace("**", "").replace("##", "")
+    s = EMOJI_RE.sub("", s)
+    return re.sub(r"\s+", " ", s).strip()
 
 # ============================================================
 # ПАРСИНГ САЙТА
@@ -335,40 +337,60 @@ def pick_page(urls, hist):
     return None, "", "", ""
 
 # ============================================================
-# ГЕНЕРАЦИЯ ПОДЗАГОЛОВКОВ, СТАТЬИ, НОВОСТИ
+# ЗАГОЛОВКИ + ПОДЗАГОЛОВКИ (один запрос ИИ, 8 строк)
 # ============================================================
 
-def generate_headings(title, desc, seeds):
+def generate_headings_and_titles(title, desc, seeds):
+    fallback = {
+        "article_title": f"{title}: устройство, возможности и сценарии применения решения PAVRUS",
+        "news_title": f"{title}: что интересного в этом решении PAVRUS",
+        "what_is": seeds["what_is"], "purpose": seeds["purpose"],
+        "features": seeds["features"], "advantages": seeds["advantages"],
+        "usage": seeds["usage"], "conclusion": seeds["conclusion"],
+    }
     prompt = (
-        f"Ты — эксперт по профессиональному AV-оборудованию PAVRUS. "
-        f"На основе фраз-затравок придумай 6 УНИКАЛЬНЫХ развёрнутых подзаголовков (5-10 слов) "
-        f"для статьи о конкретном товаре.\n\n"
+        f"Ты — эксперт по профессиональному AV-оборудованию PAVRUS и редактор делового издания.\n"
+        f"Придумай для статьи о товаре:\n"
+        f"- уникальный заголовок СТАТЬИ (предложением, 8-14 слов, обычные буквы, без markdown и кавычек)\n"
+        f"- уникальный заголовок НОВОСТИ (предложением, 6-10 слов, обычные буквы, без markdown и кавычек)\n"
+        f"- 6 развёрнутых подзаголовков разделов статьи (5-10 слов каждый) на основе затравок.\n\n"
         f"ТОВАР: {title}\nОПИСАНИЕ: {desc}\n\n"
-        f"ЗАТРАВКИ:\n"
+        f"ЗАТРАВКИ ПОДЗАГОЛОВКОВ:\n"
         f"1. {seeds['what_is']}\n2. {seeds['purpose']}\n3. {seeds['features']}\n"
         f"4. {seeds['advantages']}\n5. {seeds['usage']}\n6. {seeds['conclusion']}\n\n"
-        f"ТРЕБОВАНИЯ: каждый подзаголовок 5-10 слов, конкретный, упоминает товар или его особенность. "
-        f"Формат ответа СТРОГО 6 строк без нумерации и лишних слов.\n"
+        f"ТРЕБОВАНИЯ: заголовки и подзаголовки конкретные, упоминают товар или его особенность, "
+        f"без слов «инновационный» и «революционный».\n"
+        f"Формат ответа СТРОГО 8 строк без нумерации и лишних слов:\n"
+        f"заголовок статьи\nзаголовок новости\nподзаголовок 1\nподзаголовок 2\n"
+        f"подзаголовок 3\nподзаголовок 4\nподзаголовок 5\nподзаголовок 6\n"
     )
     result = gigachat_chat(prompt, GIGACHAT_MODEL or "GigaChat:latest")
     if not result:
-        log("⚠️ Подзаголовки не сгенерированы — использую затравки")
-        return seeds
-    lines = [l.strip() for l in result.split("\n") if l.strip()]
-    if len(lines) < 6:
-        log("⚠️ Мало строк подзаголовков — использую затравки")
-        return seeds
-    headings = {k: EMOJI_RE.sub("", lines[i]).replace("**", "")[:80]
-                for i, k in enumerate(["what_is", "purpose", "features",
-                                       "advantages", "usage", "conclusion"])}
-    log("📝 Сгенерированные подзаголовки:")
-    for v in headings.values():
-        log(f"   • {v}")
-    return headings
+        log("⚠️ Заголовки не сгенерированы — использую запасные")
+        return fallback
+    lines = [clean_plain(l) for l in result.split("\n") if clean_plain(l)]
+    if len(lines) < 8:
+        log(f"⚠️ ИИ вернул {len(lines)} строк вместо 8 — использую запасные")
+        return fallback
+    out = {
+        "article_title": lines[0][:120],
+        "news_title": lines[1][:100],
+        "what_is": lines[2][:80], "purpose": lines[3][:80],
+        "features": lines[4][:80], "advantages": lines[5][:80],
+        "usage": lines[6][:80], "conclusion": lines[7][:80],
+    }
+    log(f"📰 Заголовок статьи: {out['article_title']}")
+    log(f"📰 Заголовок новости: {out['news_title']}")
+    log("📝 Подзаголовки:")
+    for k in ("what_is", "purpose", "features", "advantages", "usage", "conclusion"):
+        log(f"   • {out[k]}")
+    return out
 
-def generate_article(title, desc, body, url):
-    seeds = select_seeds()
-    headings = generate_headings(title, desc, seeds)
+# ============================================================
+# ГЕНЕРАЦИЯ СТАТЬИ И НОВОСТИ
+# ============================================================
+
+def generate_article(title, desc, body, url, hd):
     prompt = (
         f"Напиши развёрнутую экспертную статью о профессиональном AV-оборудовании PAVRUS.\n\n"
         f"НАЗВАНИЕ ТОВАРА: {title}\n"
@@ -379,14 +401,14 @@ def generate_article(title, desc, body, url):
         f"1. Язык: ТОЛЬКО русский.\n"
         f"2. Длина: СТРОГО 1800-2500 символов. Длиннее 2600 — грубая ошибка!\n"
         f"3. Формат: ТОЛЬКО чистый HTML: <h2> разделы, <p> абзацы. БЕЗ markdown, БЕЗ ##, БЕЗ эмодзи, БЕЗ id-атрибутов.\n"
-        f"4. НЕ пиши вводный титул-заголовок — начинай сразу с первого <h2>.\n"
+        f"4. НЕ пиши заголовок статьи и слово «СТАТЬЯ» — начинай сразу с первого <h2>.\n"
         f"5. СТРУКТУРА (именно эти подзаголовки):\n"
-        f"   <h2>{headings['what_is']}</h2> — 2 абзаца\n"
-        f"   <h2>{headings['purpose']}</h2> — 2 абзаца\n"
-        f"   <h2>{headings['features']}</h2> — 2 абзаца\n"
-        f"   <h2>{headings['advantages']}</h2> — 1-2 абзаца\n"
-        f"   <h2>{headings['usage']}</h2> — 1 абзац\n"
-        f"   <h2>{headings['conclusion']}</h2> — 1 абзац\n"
+        f"   <h2>{hd['what_is']}</h2> — 2 абзаца\n"
+        f"   <h2>{hd['purpose']}</h2> — 2 абзаца\n"
+        f"   <h2>{hd['features']}</h2> — 2 абзаца\n"
+        f"   <h2>{hd['advantages']}</h2> — 1-2 абзаца\n"
+        f"   <h2>{hd['usage']}</h2> — 1 абзац\n"
+        f"   <h2>{hd['conclusion']}</h2> — 1 абзац\n"
         f"6. Стиль: эксперт по AV-оборудованию, живо и конкретно, без воды.\n"
         f"7. Не выдумывай характеристики, которых нет в исходных данных.\n"
         f"8. В последнем абзаце: «По всем вопросам обращайтесь к специалистам компании PAVRUS».\n"
@@ -396,9 +418,9 @@ def generate_article(title, desc, body, url):
         log("⚠️ Объёмная статья не получилась — вторая попытка")
         prompt2 = (
             f"Статья о товаре PAVRUS «{title}». Описание: {desc}. Характеристики: {body[:500]}.\n"
-            f"1500-2200 символов, чистый HTML (<h2>, <p>), без markdown и эмодзи. Подзаголовки:\n"
-            f"- {headings['what_is']}\n- {headings['purpose']}\n- {headings['features']}\n"
-            f"- {headings['advantages']}\n- {headings['usage']}\n- {headings['conclusion']}\n"
+            f"1500-2200 символов, чистый HTML (<h2>, <p>), без markdown и эмодзи, без заголовка в начале. Подзаголовки:\n"
+            f"- {hd['what_is']}\n- {hd['purpose']}\n- {hd['features']}\n"
+            f"- {hd['advantages']}\n- {hd['usage']}\n- {hd['conclusion']}\n"
             f"В конце: «По всем вопросам обращайтесь к специалистам компании PAVRUS»."
         )
         article = ai_gigachat(prompt2, minlen=1200)
@@ -408,17 +430,17 @@ def generate_article(title, desc, body, url):
     article = trim_article(article, 2600)
     return article
 
-def generate_news_from_article(article, title, url):
-    plain = re.sub(r"<[^>]+>", " ", article)
-    plain = re.sub(r"\s+", " ", plain).strip()
+def generate_news_from_article(article, title, hd):
+    plain = clean_plain(article)
     prompt = (
         f"Сожми статью в короткую новость.\n\nСТАТЬЯ:\n{plain[:1800]}\n\nТОВАР: {title}\n\n"
         f"ТРЕБОВАНИЯ:\n"
         f"1. ТОЛЬКО русский язык.\n"
         f"2. Длина СТРОГО 500-700 символов.\n"
-        f"3. Формат: ТОЛЬКО чистый HTML: <h2>Заголовок</h2> и 2-3 <p>. БЕЗ markdown, БЕЗ ##, БЕЗ эмодзи.\n"
-        f"4. Содержание: что за товар, главное применение, ключевая особенность.\n"
-        f"5. В конце: «Подробнее — у специалистов PAVRUS».\n"
+        f"3. Верни ТОЛЬКО тело новости БЕЗ заголовка: 3-4 абзаца <p> и 1-2 подзаголовка <h2> внутри текста.\n"
+        f"4. Формат: чистый HTML, БЕЗ markdown, БЕЗ ##, БЕЗ эмодзи, БЕЗ id-атрибутов.\n"
+        f"5. Содержание: что за товар, главное применение, ключевая особенность.\n"
+        f"6. В конце: «Подробнее — у специалистов PAVRUS».\n"
     )
     news = ai_gigachat(prompt, minlen=400)
     if news:
@@ -434,15 +456,15 @@ def generate_news_from_article(article, title, url):
         if len(s) < 20:
             continue
         out.append(s)
-        if len(" ".join(out)) >= 550:
+        if len(" ".join(out)) >= 500:
             break
     text = " ".join(out)
-    if len(text) > 700:
-        text = text[:700].rsplit(".", 1)[0] + "."
-    return f"<h2>{title}</h2><p>{text}</p><p>Подробнее — у специалистов PAVRUS.</p>"
+    if len(text) > 650:
+        text = text[:650].rsplit(".", 1)[0] + "."
+    return f"<p>{text}</p><h2>Где узнать больше</h2><p>Подробнее — у специалистов PAVRUS.</p>"
 
 # ============================================================
-# DOCX
+# DOCX — ЕДИНСТВЕННЫЙ ФОРМАТ ВЫВОДА
 # ============================================================
 
 def html_to_lines(text):
@@ -452,30 +474,31 @@ def html_to_lines(text):
     t = re.sub(r"<[^>]+>", "", t)
     return [l.strip() for l in t.split("\n") if l.strip()]
 
-def create_docx(title, article, news, url, date_str, slug):
+def add_body(doc, text):
+    for line in html_to_lines(text):
+        if line.startswith("### "):
+            doc.add_heading(line[4:], 3)
+        elif line.startswith("## "):
+            doc.add_heading(line[3:], 2)
+        else:
+            doc.add_paragraph(line)
+
+def create_docx(title, article_title, news_title, article, news, url, date_str, slug):
     if not DOCX_OK:
-        log("⚠️ python-docx не установлен — DOCX пропущен")
+        log("❌ python-docx не установлен — DOCX создать невозможно")
         return None
     doc = Document()
     doc.add_heading(f"PAVRUS: {title}", 0)
-    doc.add_paragraph(f"Дата: {date_str} | Ссылка: {url}")
-    doc.add_heading("СТАТЬЯ", 1)
-    for line in html_to_lines(article):
-        if line.startswith("### "):
-            doc.add_heading(line[4:], 3)
-        elif line.startswith("## "):
-            doc.add_heading(line[3:], 2)
-        else:
-            doc.add_paragraph(line)
+    doc.add_paragraph(f"Дата: {date_str}")
+    doc.add_paragraph(f"Ссылка: {url}")
+    doc.add_paragraph("")
+    doc.add_paragraph("СТАТЬЯ")                 # обычным стилем
+    doc.add_paragraph(article_title)            # обычным стилем, без выделения
+    add_body(doc, article)                      # подзаголовки — стилевые
     doc.add_page_break()
-    doc.add_heading("НОВОСТЬ", 1)
-    for line in html_to_lines(news):
-        if line.startswith("### "):
-            doc.add_heading(line[4:], 3)
-        elif line.startswith("## "):
-            doc.add_heading(line[3:], 2)
-        else:
-            doc.add_paragraph(line)
+    doc.add_paragraph("НОВОСТЬ")                # обычным стилем
+    doc.add_paragraph(news_title)               # обычным стилем, без выделения
+    add_body(doc, news)                         # 1-2 подзаголовка — стилевые
     os.makedirs("articles_output", exist_ok=True)
     path = f"articles_output/{date_str}_{slug}.docx"
     doc.save(path)
@@ -502,14 +525,17 @@ def main():
         log("❌ Не найдена подходящая страница PAVRUS")
         sys.exit(1)
 
-    log("📝 Этап 3: генерация статьи (1800-2500 симв.)...")
-    article = generate_article(title, desc, body, page)
+    log("📝 Этап 3: заголовки + подзаголовки + статья (1800-2500 симв.)...")
+    seeds = select_seeds()
+    hd = generate_headings_and_titles(title, desc, seeds)
+
+    article = generate_article(title, desc, body, page, hd)
     if not article:
         log("❌ GigaChat не смог написать статью — выход без мусорного фолбэка")
         sys.exit(1)
 
     log("📰 Этап 4: генерация новости (500-700 симв.)...")
-    news = generate_news_from_article(article, title, page)
+    news = generate_news_from_article(article, title, hd)
     if not news:
         log("❌ Новость не создана — выход")
         sys.exit(1)
@@ -520,35 +546,23 @@ def main():
     log("=" * 60)
     log(f"🎯 ТОВАР PAVRUS: {title}")
     log(f"🔗 ССЫЛКА: {page}")
+    log(f"📰 ЗАГОЛОВОК СТАТЬИ: {hd['article_title']}")
+    log(f"📰 ЗАГОЛОВОК НОВОСТИ: {hd['news_title']}")
     log("=" * 60)
-    log("✅ СТАТЬЯ:")
-    log(article[:500] + ("..." if len(article) > 500 else ""))
-    log(f"   Длина: {len(article)} симв.")
-    log("=" * 60)
-    log("✅ НОВОСТЬ:")
-    log(news[:300] + ("..." if len(news) > 300 else ""))
-    log(f"   Длина: {len(news)} симв.")
+    log(f"✅ СТАТЬЯ: {len(article)} симв.")
+    log(f"✅ НОВОСТЬ: {len(news)} симв.")
     log("=" * 60)
 
-    output_dir = "articles_output"
-    os.makedirs(output_dir, exist_ok=True)
     slug = re.sub(r"[^a-z0-9]+", "-", title.lower())[:50]
     date_str = datetime.date.today().strftime("%Y-%m-%d")
 
-    with open(f"{output_dir}/{date_str}_{slug}_article.html", "w", encoding="utf-8") as f:
-        f.write(f"<!DOCTYPE html><html lang='ru'><head><meta charset='utf-8'><title>{title}</title></head>"
-                f"<body><h1>{title} (PAVRUS)</h1>{article}"
-                f"<p><a href='{page}'>Подробнее на сайте</a></p></body></html>")
+    docx_path = create_docx(title, hd["article_title"], hd["news_title"],
+                            article, news, page, date_str, slug)
+    if not docx_path:
+        log("❌ DOCX не создан — выход")
+        sys.exit(1)
 
-    with open(f"{output_dir}/{date_str}_{slug}_news.html", "w", encoding="utf-8") as f:
-        f.write(f"<!DOCTYPE html><html lang='ru'><head><meta charset='utf-8'><title>{title}</title></head>"
-                f"<body>{news}<p><a href='{page}'>Подробнее</a></p></body></html>")
-
-    with open(f"{output_dir}/{date_str}_{slug}_texts.txt", "w", encoding="utf-8") as f:
-        f.write(f"ТОВАР PAVRUS: {title}\nССЫЛКА: {page}\n\n=== СТАТЬЯ ===\n{article}\n\n=== НОВОСТЬ ===\n{news}")
-
-    create_docx(title, article, news, page, date_str, slug)
-    log("✅ FINISH: статья + новость + DOCX готовы к ручной публикации!")
+    log("✅ FINISH: DOCX со статьёй и новостью готов к ручной публикации!")
 
 if __name__ == "__main__":
     try:
