@@ -66,7 +66,7 @@ CATEGORY_SEEDS = [
 def log(msg):
     print(msg, flush=True)
 
-log("Версия ℹ️ pavrus-vk-agent v26 (картинки: OpenAI DALL-E 3 → HF FLUX → pollinations+обрезка; альбом; 8 ступеней ИИ)")
+log("Версия ℹ️ pavrus-vk-agent v27 (исправлен альбом: photos.save; повтор ИИ через 30 сек; картинки DALL-E 3 → HF → pollinations)")
 
 # ============================================================
 # ИИ-ТЕКСТ: 8 ступеней
@@ -362,11 +362,10 @@ def choose_image(imgs, referer):
     return best
 
 # ============================================================
-# ГЕНЕРАЦИЯ КАРТИНОК v26: OpenAI DALL-E 3 → HF FLUX → pollinations
+# ГЕНЕРАЦИЯ КАРТИНОК: OpenAI DALL-E 3 → HF FLUX → pollinations
 # ============================================================
 
 def openai_image(prompt):
-    """DALL-E 3: высокое качество, без водяных знаков."""
     if not OPENAI_KEY:
         return None
     full = prompt + ", photorealistic, high resolution, no text, no logos, no watermark"
@@ -388,7 +387,6 @@ def openai_image(prompt):
         return None
 
 def hf_image(prompt):
-    """Hugging Face FLUX: бесплатно, без водяных знаков."""
     if not HF_TOKEN:
         return None
     full = prompt + ", photorealistic, high resolution, no text, no logos, no watermark"
@@ -458,7 +456,7 @@ def parse_text(r):
     return h1, desc, body
 
 # ============================================================
-# ВК: путь 1 (wall server) → путь 2 (альбом группы)
+# ВК v27: путь 1 (wall server) → путь 2 (альбом, метод photos.save)
 # ============================================================
 
 def vk_call(method, params, token):
@@ -488,6 +486,7 @@ def vk_get_album_id():
     return None
 
 def vk_upload_via_album(img_bytes):
+    """v27: сохранение в альбом через photos.save (photos.savePhotos не существует!)."""
     album = vk_get_album_id()
     if not album:
         log("ℹ️ ВК: путь 2 пропущен (нет VK_ALBUM_ID / vk_album.json)")
@@ -507,7 +506,7 @@ def vk_upload_via_album(img_bytes):
         if not r.get("hash") or not r.get("photos_list"):
             log(f"⚠️ ВК upload в альбом: пустой ответ: {str(r)[:120]}")
             continue
-        saved = vk_call("photos.savePhotos",
+        saved = vk_call("photos.save",
                         {"group_id": VK_GROUP_ID, "album_id": album,
                          "server": r.get("server", ""), "photos_list": r.get("photos_list", ""),
                          "hash": r.get("hash", "")}, tok)
@@ -673,6 +672,10 @@ def main():
         f"6. Без хэштегов."
     )
     text = ai_call(prompt, 400)
+    if not text:
+        log("⏳ Все ИИ молчат с первого захода — пауза 30 сек и повторный прогон")
+        time.sleep(30)
+        text = ai_call(prompt, 400)
     if not text:
         base = body[:900] or desc
         text = f"{title}\n\n{base}\n\nПодробнее: {page}"
