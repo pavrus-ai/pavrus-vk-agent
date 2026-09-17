@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-import os, re, json, html, random, sys, io, time, datetime, base64, requests, urllib3
+import os, re, json, html, random, sys, io, time, datetime, base64, uuid, requests, urllib3
 from PIL import Image
 urllib3.disable_warnings()
 
@@ -14,11 +14,9 @@ OR_KEY = os.environ.get("OPENROUTER_KEY", "").strip()
 OR_KEY2 = os.environ.get("OPENROUTER_KEY2", "").strip()
 CEREBRAS_KEY = os.environ.get("CEREBRAS_KEY", "").strip()
 MISTRAL_KEY = os.environ.get("MISTRAL_KEY", "").strip()
-GH_AI_TOKEN = os.environ.get("GITHUB_TOKEN", "").strip()
 OPENAI_KEY = os.environ.get("OPENAI_KEY", "").strip()
 HF_TOKEN = os.environ.get("HF_TOKEN", "").strip()
-# v30: НОВЫЕ ключи GigaChat (аккаунт 1) — только для товарного агента.
-# Старые GIGACHAT_CLIENT_ID/SECRET остаются у агента статей.
+# Ключи GigaChat НОВОГО аккаунта — только для товарного агента
 GIGACHAT_CLIENT_ID = os.environ.get("GIGACHAT_CLIENT_ID1", "").strip()
 GIGACHAT_CLIENT_SECRET = os.environ.get("GIGACHAT_CLIENT_SECRET1", "").strip()
 
@@ -73,10 +71,10 @@ CATEGORY_SEEDS = [
 def log(msg):
     print(msg, flush=True)
 
-log("Версия ℹ️ pavrus-vk-agent v30 (GigaChat на ключах «1» первой ступенью + диагностика ошибок ИИ; остальное как v28)")
+log("Версия ℹ️ pavrus-vk-agent v31 (uuid-фикс GigaChat; groq: llama-4/gpt-oss; openrouter auto с малыми max_tokens; без github-models)")
 
 # ============================================================
-# ИИ-ТЕКСТ: 9 ступеней С ДИАГНОСТИКОЙ
+# ИИ-ТЕКСТ: ступени с диагностикой
 # ============================================================
 
 def _extract(r):
@@ -92,7 +90,7 @@ def _err_snippet(r):
 RU_SUFFIX = "\n\nВАЖНО: Пиши ТОЛЬКО на русском языке."
 
 # ------------------------------------------------------------
-# GigaChat (ключи нового аккаунта, scope PERS)
+# GigaChat (ключи нового аккаунта)
 # ------------------------------------------------------------
 
 _GIGACHAT_TOKEN = None
@@ -147,30 +145,8 @@ def ai_gigachat(prompt):
     return None
 
 # ------------------------------------------------------------
-# Остальные провайдеры (с логом ошибок)
+# Остальные провайдеры
 # ------------------------------------------------------------
-
-def ai_github(prompt):
-    if not GH_AI_TOKEN: return None
-    endpoints = ["https://models.github.ai/inference/chat/completions",
-                 "https://models.inference.ai.azure.com/chat/completions"]
-    models = ["openai/gpt-4o-mini", "gpt-4o-mini"]
-    for ep in endpoints:
-        for mdl in models:
-            try:
-                r = requests.post(ep,
-                    headers={"Authorization": f"Bearer {GH_AI_TOKEN}"},
-                    json={"model": mdl, "temperature": 0.8,
-                          "messages": [{"role": "user", "content": prompt + RU_SUFFIX}]}, timeout=60).json()
-                if "error" in r:
-                    log(f"   ⚠️ github-models {mdl}: {_err_snippet(r)}")
-                    continue
-                res = _extract(r)
-                if res: return res
-            except Exception as e:
-                log(f"   ⚠️ github-models {mdl}: сеть/ошибка {str(e)[:80]}")
-                continue
-    return None
 
 def ai_cerebras(prompt):
     if not CEREBRAS_KEY: return None
@@ -202,40 +178,43 @@ def ai_mistral(prompt):
         log(f"   ⚠️ mistral: сеть/ошибка {str(e)[:80]}")
         return None
 
-def ai_groq(prompt, key):
+def ai_groq(prompt, key, model):
     if not key: return None
     try:
         r = requests.post("https://api.groq.com/openai/v1/chat/completions",
             headers={"Authorization": f"Bearer {key}"},
-            json={"model": "llama-3.3-70b-versatile", "temperature": 0.8,
+            json={"model": model, "temperature": 0.8,
                   "messages": [{"role": "user", "content": prompt + RU_SUFFIX}]}, timeout=60).json()
         if "error" in r:
-            log(f"   ⚠️ groq: {_err_snippet(r)}")
+            log(f"   ⚠️ groq {model}: {_err_snippet(r)}")
             return None
         return _extract(r)
     except Exception as e:
-        log(f"   ⚠️ groq: сеть/ошибка {str(e)[:80]}")
+        log(f"   ⚠️ groq {model}: сеть/ошибка {str(e)[:80]}")
         return None
 
-def ai_openrouter(prompt, model, key):
-    if not key:
-        log(f"   ⚠️ openrouter {model}: ключ не передан в env!")
-        return None
+def ai_openrouter(prompt, key, max_tokens):
+    if not key: return None
     try:
         r = requests.post("https://openrouter.ai/api/v1/chat/completions",
             headers={"Authorization": f"Bearer {key}", "HTTP-Referer": "https://github.com"},
-            json={"model": model, "temperature": 0.8, "max_tokens": 2000,
+            json={"model": "auto", "temperature": 0.8, "max_tokens": max_tokens,
                   "messages": [{"role": "user", "content": prompt + RU_SUFFIX}]}, timeout=60).json()
         if "error" in r:
-            log(f"   ⚠️ openrouter {model}: {_err_snippet(r)}")
+            log(f"   ⚠️ openrouter auto (max={max_tokens}): {_err_snippet(r)}")
             return None
         return _extract(r)
     except Exception as e:
-        log(f"   ⚠️ openrouter {model}: сеть/ошибка {str(e)[:80]}")
+        log(f"   ⚠️ openrouter auto: сеть/ошибка {str(e)[:80]}")
         return None
 
+GROQ_MODELS = ["meta-llama/llama-4-scout-17b-16e-instruct",
+               "meta-llama/llama-4-maverick-17b-128e-instruct",
+               "openai/gpt-oss-120b",
+               "llama-3.1-8b-instant"]
+
 def ai_call(prompt, minlen=400):
-    """v30: GigaChat первым; каждая ошибка видна; лучший короткий ответ спасается."""
+    """v31: GigaChat → cerebras → mistral → groq(новые модели) → openrouter auto (малые max_tokens)."""
     best_res = ""
 
     def take(res, label):
@@ -250,50 +229,40 @@ def ai_call(prompt, minlen=400):
             best_res = res
         return None
 
-    # 1) GigaChat (ключи нового аккаунта)
+    # 1) GigaChat
     if not GIGACHAT_CLIENT_ID:
         log("⚠️ gigachat: GIGACHAT_CLIENT_ID1 не передан в env!")
     else:
         log("🔄 Попытка: gigachat (GigaChat:latest)...")
         r = take(ai_gigachat(prompt), "gigachat")
         if r: return r
-    # 2) GitHub Models
-    if not GH_AI_TOKEN:
-        log("⚠️ github-models: GITHUB_TOKEN не передан! Добавьте в agent.yml: GITHUB_TOKEN: ${{ github.token }}")
-    else:
-        log("🔄 Попытка: github-models (gpt-4o-mini)...")
-        r = take(ai_github(prompt), "github-models")
-        if r: return r
-    # 3) Cerebras
+    # 2) Cerebras
     if not CEREBRAS_KEY:
         log("⚠️ cerebras: CEREBRAS_KEY не передан в env!")
     else:
         log("🔄 Попытка: cerebras (llama-3.3-70b)...")
         r = take(ai_cerebras(prompt), "cerebras")
         if r: return r
-    # 4) Mistral
+    # 3) Mistral
     if not MISTRAL_KEY:
         log("⚠️ mistral: MISTRAL_KEY не передан в env!")
     else:
         log("🔄 Попытка: mistral (mistral-small)...")
         r = take(ai_mistral(prompt), "mistral")
         if r: return r
-    # 5) Groq ×2
+    # 4) Groq с актуальными моделями
     for i, key in enumerate((GROQ_KEY, GROQ_KEY2)):
         if not key: continue
-        log(f"🔄 Попытка: groq (llama-3.3-70b-versatile, ключ {i+1})...")
-        r = take(ai_groq(prompt, key), f"groq (ключ {i+1})")
-        if r: return r
-    # 6) OpenRouter ×4 ×2
-    or_models = ["meta-llama/llama-3.3-70b-instruct:free",
-                 "google/gemma-3-27b-it:free",
-                 "deepseek/deepseek-chat-v3-0324:free",
-                 "auto"]
+        for model in GROQ_MODELS:
+            log(f"🔄 Попытка: groq ({model}, ключ {i+1})...")
+            r = take(ai_groq(prompt, key, model), f"groq ({model}, ключ {i+1})")
+            if r: return r
+    # 5) OpenRouter auto с уменьшенными max_tokens (экономия кредитов)
     for i, key in enumerate((OR_KEY, OR_KEY2)):
         if not key: continue
-        for model in or_models:
-            log(f"🔄 Попытка: openrouter ({model}, ключ {i+1})...")
-            r = take(ai_openrouter(prompt, model, key), f"openrouter ({model}, ключ {i+1})")
+        for mt in (1000, 512):
+            log(f"🔄 Попытка: openrouter auto (max_tokens={mt}, ключ {i+1})...")
+            r = take(ai_openrouter(prompt, key, mt), f"openrouter auto (max={mt}, ключ {i+1})")
             if r: return r
 
     if best_res and len(best_res) >= 200:
