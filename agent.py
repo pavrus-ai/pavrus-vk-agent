@@ -33,7 +33,11 @@ UA = {"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/1
 BRAND_SLUGS = ["pavrus", "htdz", "ht-dz", "chartu", "restmoment", "rest-moment"]
 BL = ["корзин", "кабинет", "избранн", "сравнени", "войти", "заказать звонок",
       "санкт-петербург", "москва", "новосибирск", "8 (800", "info@", "показать еще",
-      "ваш город", "бесплатная доставка", "главная", "обратная связь"]
+      "ваш город", "бесплатная доставка", "главная", "обратная связь",
+      # v28: UI-мусор карточки товара (селектор количества, цены, кнопки)
+      "выбрано максимальное", "доступное для заказа", "количество товара",
+      "цена:", " руб", "₽", "купить", "оформить заказ", "в наличии", "под заказ",
+      "артикул", "арт.", "гаранти", "доставк", "cookie", "политик"]
 
 CATEGORY_SEEDS = [
     "https://pavrus.ru/catalog/pavrus-sistema-golosovaniya/",
@@ -66,7 +70,7 @@ CATEGORY_SEEDS = [
 def log(msg):
     print(msg, flush=True)
 
-log("Версия ℹ️ pavrus-vk-agent v27 (исправлен альбом: photos.save; повтор ИИ через 30 сек; картинки DALL-E 3 → HF → pollinations)")
+log("Версия ℹ️ pavrus-vk-agent v28 (чистый текст: без UI-мусора и дублей; картинки: gpt-image-1 → HF router → pollinations; альбом photos.save)")
 
 # ============================================================
 # ИИ-ТЕКСТ: 8 ступеней
@@ -362,45 +366,79 @@ def choose_image(imgs, referer):
     return best
 
 # ============================================================
-# ГЕНЕРАЦИЯ КАРТИНОК: OpenAI DALL-E 3 → HF FLUX → pollinations
+# ГЕНЕРАЦИЯ КАРТИНОК v28: gpt-image-1 → dall-e-3 → HF router → pollinations
 # ============================================================
 
 def openai_image(prompt):
     if not OPENAI_KEY:
         return None
     full = prompt + ", photorealistic, high resolution, no text, no logos, no watermark"
+    # 1) gpt-image-1 (новый API: без response_format)
     try:
         r = requests.post("https://api.openai.com/v1/images/generations",
-            headers={"Authorization": f"Bearer {OPENAI_KEY}",
-                     "Content-Type": "application/json"},
+            headers={"Authorization": f"Bearer {OPENAI_KEY}", "Content-Type": "application/json"},
+            json={"model": "gpt-image-1", "prompt": full, "n": 1, "size": "1024x1024"},
+            timeout=180).json()
+        if "error" not in r:
+            b64 = (r.get("data") or [{}])[0].get("b64_json")
+            if b64:
+                data = base64.b64decode(b64)
+                log(f"✅ OpenAI gpt-image-1: картинка {len(data)} байт (без водяного знака)")
+                return data
+        else:
+            log(f"⚠️ OpenAI gpt-image-1: {str(r['error'])[:120]}")
+    except Exception as e:
+        log(f"⚠️ OpenAI gpt-image-1 ошибка: {e}")
+    # 2) dall-e-3 с b64
+    try:
+        r = requests.post("https://api.openai.com/v1/images/generations",
+            headers={"Authorization": f"Bearer {OPENAI_KEY}", "Content-Type": "application/json"},
             json={"model": "dall-e-3", "prompt": full, "n": 1,
                   "size": "1024x1024", "quality": "standard",
                   "response_format": "b64_json"}, timeout=120).json()
-        if "error" in r:
+        if "error" not in r:
+            b64 = (r.get("data") or [{}])[0].get("b64_json")
+            if b64:
+                data = base64.b64decode(b64)
+                log(f"✅ OpenAI DALL-E 3: картинка {len(data)} байт (без водяного знака)")
+                return data
+        else:
             log(f"⚠️ OpenAI DALL-E 3: {str(r['error'])[:120]}")
-            return None
-        data = base64.b64decode(r["data"][0]["b64_json"])
-        log(f"✅ OpenAI DALL-E 3: картинка {len(data)} байт (без водяного знака)")
-        return data
     except Exception as e:
         log(f"⚠️ OpenAI ошибка: {e}")
-        return None
+    # 3) dall-e-3 по url
+    try:
+        r = requests.post("https://api.openai.com/v1/images/generations",
+            headers={"Authorization": f"Bearer {OPENAI_KEY}", "Content-Type": "application/json"},
+            json={"model": "dall-e-3", "prompt": full, "n": 1,
+                  "size": "1024x1024", "quality": "standard"}, timeout=120).json()
+        url = (r.get("data") or [{}])[0].get("url")
+        if url:
+            img = requests.get(url, timeout=120).content
+            log(f"✅ OpenAI DALL-E 3 (url): картинка {len(img)} байт")
+            return img
+    except Exception as e:
+        log(f"⚠️ OpenAI url ошибка: {e}")
+    return None
 
 def hf_image(prompt):
     if not HF_TOKEN:
         return None
     full = prompt + ", photorealistic, high resolution, no text, no logos, no watermark"
-    for mdl in ("black-forest-labs/FLUX.1-schnell", "black-forest-labs/FLUX.1-dev"):
-        try:
-            r = requests.post(f"https://api-inference.huggingface.co/models/{mdl}",
-                headers={"Authorization": f"Bearer {HF_TOKEN}"},
-                json={"inputs": full}, timeout=120)
-            if r.status_code == 200 and r.headers.get("Content-Type", "").startswith("image/"):
-                log(f"✅ HF {mdl}: картинка {len(r.content)} байт (без водяного знака)")
-                return r.content
-            log(f"⚠️ HF {mdl}: ответ {r.status_code}: {r.text[:80]}")
-        except Exception as e:
-            log(f"⚠️ HF {mdl} ошибка: {e}")
+    bases = ["https://router.huggingface.co/hf-inference/models/",
+             "https://api-inference.huggingface.co/models/"]
+    for base in bases:
+        for mdl in ("black-forest-labs/FLUX.1-schnell", "black-forest-labs/FLUX.1-dev"):
+            try:
+                r = requests.post(base + mdl,
+                    headers={"Authorization": f"Bearer {HF_TOKEN}"},
+                    json={"inputs": full}, timeout=120)
+                if r.status_code == 200 and r.headers.get("Content-Type", "").startswith("image/"):
+                    log(f"✅ HF {mdl}: картинка {len(r.content)} байт (без водяного знака)")
+                    return r.content
+                log(f"⚠️ HF {mdl}: ответ {r.status_code}: {r.text[:80]}")
+            except Exception as e:
+                log(f"⚠️ HF {mdl} ошибка: {str(e)[:80]}")
     return None
 
 def generate_product_image(title, desc):
@@ -449,14 +487,27 @@ def parse_text(r):
     chunks = re.findall(r"<p[^>]*>(.*?)</p>", tail, re.S | re.I)
     chunks += re.findall(r'<div[^>]+class=["\'][^"\']*(?:descr|text|content|detail|char)[^"\']*["\'][^>]*>(.*?)</div>', tail, re.S | re.I)
     raw = " ".join(clean(c) for c in chunks)
-    keep = [s.strip() for s in raw.split(". ")
-            if len(s.strip()) > 30 and "{" not in s
-            and not any(b in s.lower() for b in BL)]
-    body = " ".join(keep)[:1500]
+    # v28: чистка UI-мусора ("- + × Выбрано максимальное...") + удаление дублей предложений
+    seen = set()
+    keep = []
+    for s in raw.split(". "):
+        s = s.strip()
+        s = re.sub(r"^[\s\-+×✕*•·|/\\—–]+", "", s).strip()   # срезаем "- + ×" в начале
+        s = re.sub(r"\s{2,}", " ", s)
+        if len(s) < 30 or "{" in s:
+            continue
+        low = s.lower()
+        if any(b in low for b in BL):
+            continue
+        if low in seen:
+            continue
+        seen.add(low)
+        keep.append(s)
+    body = ". ".join(keep)[:1500]
     return h1, desc, body
 
 # ============================================================
-# ВК v27: путь 1 (wall server) → путь 2 (альбом, метод photos.save)
+# ВК: путь 1 (wall server) → путь 2 (альбом, метод photos.save)
 # ============================================================
 
 def vk_call(method, params, token):
@@ -486,7 +537,7 @@ def vk_get_album_id():
     return None
 
 def vk_upload_via_album(img_bytes):
-    """v27: сохранение в альбом через photos.save (photos.savePhotos не существует!)."""
+    """Сохранение в альбом через photos.save (photos.savePhotos не существует!)."""
     album = vk_get_album_id()
     if not album:
         log("ℹ️ ВК: путь 2 пропущен (нет VK_ALBUM_ID / vk_album.json)")
@@ -631,7 +682,7 @@ def main():
         imgs = parse_gallery(r) or parse_other_imgs(r)
         img = choose_image(imgs, u) if imgs else None
         if not img:
-            log("⚠️ Картинка товара недоступна (404/мелкая) — генерирую (DALL-E 3 → HF → pollinations)")
+            log("⚠️ Картинка товара недоступна (404/мелкая) — генерирую (gpt-image-1 → HF → pollinations)")
             img = generate_product_image(title, desc)
         if not img:
             log(f"⚠️ Попытка {i+1}: не удалось получить картинку — {u}")
