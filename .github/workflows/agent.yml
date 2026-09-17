@@ -37,6 +37,8 @@ jobs:
           OPENROUTER_KEY2: ${{ secrets.OPENROUTER_KEY2 }}
           OPENAI_KEY: ${{ secrets.OPENAI_KEY }}
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          GIGACHAT_CLIENT_ID1: ${{ secrets.GIGACHAT_CLIENT_ID1 }}
+          GIGACHAT_CLIENT_SECRET1: ${{ secrets.GIGACHAT_CLIENT_SECRET1 }}
         run: python agent.py
 
       - name: Commit history and sitemap cache
