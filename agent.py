@@ -17,6 +17,10 @@ MISTRAL_KEY = os.environ.get("MISTRAL_KEY", "").strip()
 GH_AI_TOKEN = os.environ.get("GITHUB_TOKEN", "").strip()
 OPENAI_KEY = os.environ.get("OPENAI_KEY", "").strip()
 HF_TOKEN = os.environ.get("HF_TOKEN", "").strip()
+# v30: НОВЫЕ ключи GigaChat (аккаунт 1) — только для товарного агента.
+# Старые GIGACHAT_CLIENT_ID/SECRET остаются у агента статей.
+GIGACHAT_CLIENT_ID = os.environ.get("GIGACHAT_CLIENT_ID1", "").strip()
+GIGACHAT_CLIENT_SECRET = os.environ.get("GIGACHAT_CLIENT_SECRET1", "").strip()
 
 SITE = "https://pavrus.ru"
 SITEMAP = SITE + "/sitemap.xml"
@@ -34,7 +38,6 @@ BRAND_SLUGS = ["pavrus", "htdz", "ht-dz", "chartu", "restmoment", "rest-moment"]
 BL = ["корзин", "кабинет", "избранн", "сравнени", "войти", "заказать звонок",
       "санкт-петербург", "москва", "новосибирск", "8 (800", "info@", "показать еще",
       "ваш город", "бесплатная доставка", "главная", "обратная связь",
-      # v28: UI-мусор карточки товара (селектор количества, цены, кнопки)
       "выбрано максимальное", "доступное для заказа", "количество товара",
       "цена:", " руб", "₽", "купить", "оформить заказ", "в наличии", "под заказ",
       "артикул", "арт.", "гаранти", "доставк", "cookie", "политик"]
@@ -70,17 +73,82 @@ CATEGORY_SEEDS = [
 def log(msg):
     print(msg, flush=True)
 
-log("Версия ℹ️ pavrus-vk-agent v28 (чистый текст: без UI-мусора и дублей; картинки: gpt-image-1 → HF router → pollinations; альбом photos.save)")
+log("Версия ℹ️ pavrus-vk-agent v30 (GigaChat на ключах «1» первой ступенью + диагностика ошибок ИИ; остальное как v28)")
 
 # ============================================================
-# ИИ-ТЕКСТ: 8 ступеней
+# ИИ-ТЕКСТ: 9 ступеней С ДИАГНОСТИКОЙ
 # ============================================================
 
 def _extract(r):
     try: return r["choices"][0]["message"]["content"].strip()
     except (KeyError, IndexError, TypeError): return None
 
+def _err_snippet(r):
+    e = r.get("error") or {}
+    code = e.get("code") or e.get("type") or "?"
+    msg = str(e.get("message") or e)
+    return f"{code}: {msg[:100]}"
+
 RU_SUFFIX = "\n\nВАЖНО: Пиши ТОЛЬКО на русском языке."
+
+# ------------------------------------------------------------
+# GigaChat (ключи нового аккаунта, scope PERS)
+# ------------------------------------------------------------
+
+_GIGACHAT_TOKEN = None
+_GIGACHAT_TOKEN_EXPIRY = 0
+
+def get_gigachat_token():
+    global _GIGACHAT_TOKEN, _GIGACHAT_TOKEN_EXPIRY
+    if not GIGACHAT_CLIENT_ID or not GIGACHAT_CLIENT_SECRET:
+        return None
+    if _GIGACHAT_TOKEN and time.time() < _GIGACHAT_TOKEN_EXPIRY:
+        return _GIGACHAT_TOKEN
+    try:
+        credentials = base64.b64encode(f"{GIGACHAT_CLIENT_ID}:{GIGACHAT_CLIENT_SECRET}".encode()).decode()
+        r = requests.post("https://ngw.devices.sberbank.ru:9443/api/v2/oauth",
+            headers={"Authorization": f"Basic {credentials}",
+                     "RqUID": str(uuid.uuid4()),
+                     "Content-Type": "application/x-www-form-urlencoded"},
+            data={"scope": "GIGACHAT_API_PERS"},
+            timeout=30, verify=False)
+        log(f"ℹ️ GigaChat OAuth: статус {r.status_code}")
+        if r.status_code != 200:
+            log(f"⚠️ GigaChat OAuth тело: {r.text[:300]}")
+            return None
+        j = r.json()
+        if "access_token" in j:
+            _GIGACHAT_TOKEN = j["access_token"]
+            _GIGACHAT_TOKEN_EXPIRY = time.time() + 1700
+            log("✅ GigaChat: токен получен (действует 30 мин)")
+            return _GIGACHAT_TOKEN
+    except Exception as e:
+        log(f"⚠️ GigaChat auth error: {e}")
+    return None
+
+def ai_gigachat(prompt):
+    token = get_gigachat_token()
+    if not token:
+        return None
+    try:
+        r = requests.post("https://gigachat.devices.sberbank.ru/api/v1/chat/completions",
+            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+            json={"model": "GigaChat:latest", "temperature": 0.8, "max_tokens": 2000,
+                  "messages": [{"role": "user", "content": prompt + RU_SUFFIX}]},
+            timeout=90, verify=False)
+        if r.status_code != 200:
+            log(f"⚠️ GigaChat chat: статус {r.status_code}: {r.text[:200]}")
+            return None
+        res = r.json()["choices"][0]["message"]["content"].strip()
+        if res:
+            return res
+    except Exception as e:
+        log(f"⚠️ GigaChat error: {e}")
+    return None
+
+# ------------------------------------------------------------
+# Остальные провайдеры (с логом ошибок)
+# ------------------------------------------------------------
 
 def ai_github(prompt):
     if not GH_AI_TOKEN: return None
@@ -94,10 +162,13 @@ def ai_github(prompt):
                     headers={"Authorization": f"Bearer {GH_AI_TOKEN}"},
                     json={"model": mdl, "temperature": 0.8,
                           "messages": [{"role": "user", "content": prompt + RU_SUFFIX}]}, timeout=60).json()
-                if "error" in r: continue
+                if "error" in r:
+                    log(f"   ⚠️ github-models {mdl}: {_err_snippet(r)}")
+                    continue
                 res = _extract(r)
                 if res: return res
-            except Exception:
+            except Exception as e:
+                log(f"   ⚠️ github-models {mdl}: сеть/ошибка {str(e)[:80]}")
                 continue
     return None
 
@@ -108,9 +179,13 @@ def ai_cerebras(prompt):
             headers={"Authorization": f"Bearer {CEREBRAS_KEY}"},
             json={"model": "llama-3.3-70b", "temperature": 0.8,
                   "messages": [{"role": "user", "content": prompt + RU_SUFFIX}]}, timeout=60).json()
-        if "error" in r: return None
+        if "error" in r:
+            log(f"   ⚠️ cerebras: {_err_snippet(r)}")
+            return None
         return _extract(r)
-    except Exception: return None
+    except Exception as e:
+        log(f"   ⚠️ cerebras: сеть/ошибка {str(e)[:80]}")
+        return None
 
 def ai_mistral(prompt):
     if not MISTRAL_KEY: return None
@@ -119,9 +194,13 @@ def ai_mistral(prompt):
             headers={"Authorization": f"Bearer {MISTRAL_KEY}"},
             json={"model": "mistral-small-latest", "temperature": 0.8,
                   "messages": [{"role": "user", "content": prompt + RU_SUFFIX}]}, timeout=60).json()
-        if "error" in r: return None
+        if "error" in r:
+            log(f"   ⚠️ mistral: {_err_snippet(r)}")
+            return None
         return _extract(r)
-    except Exception: return None
+    except Exception as e:
+        log(f"   ⚠️ mistral: сеть/ошибка {str(e)[:80]}")
+        return None
 
 def ai_groq(prompt, key):
     if not key: return None
@@ -130,53 +209,82 @@ def ai_groq(prompt, key):
             headers={"Authorization": f"Bearer {key}"},
             json={"model": "llama-3.3-70b-versatile", "temperature": 0.8,
                   "messages": [{"role": "user", "content": prompt + RU_SUFFIX}]}, timeout=60).json()
-        if "error" in r: return None
+        if "error" in r:
+            log(f"   ⚠️ groq: {_err_snippet(r)}")
+            return None
         return _extract(r)
-    except Exception: return None
+    except Exception as e:
+        log(f"   ⚠️ groq: сеть/ошибка {str(e)[:80]}")
+        return None
 
 def ai_openrouter(prompt, model, key):
-    if not key: return None
+    if not key:
+        log(f"   ⚠️ openrouter {model}: ключ не передан в env!")
+        return None
     try:
         r = requests.post("https://openrouter.ai/api/v1/chat/completions",
             headers={"Authorization": f"Bearer {key}", "HTTP-Referer": "https://github.com"},
             json={"model": model, "temperature": 0.8, "max_tokens": 2000,
                   "messages": [{"role": "user", "content": prompt + RU_SUFFIX}]}, timeout=60).json()
-        if "error" in r: return None
+        if "error" in r:
+            log(f"   ⚠️ openrouter {model}: {_err_snippet(r)}")
+            return None
         return _extract(r)
-    except Exception: return None
+    except Exception as e:
+        log(f"   ⚠️ openrouter {model}: сеть/ошибка {str(e)[:80]}")
+        return None
 
 def ai_call(prompt, minlen=400):
+    """v30: GigaChat первым; каждая ошибка видна; лучший короткий ответ спасается."""
+    best_res = ""
+
+    def take(res, label):
+        nonlocal best_res
+        if not res:
+            return None
+        if len(res) >= minlen:
+            log(f"✅ Успех: {label}, {len(res)} симв.")
+            return res
+        log(f"   ⚠️ {label}: текст короче нужного ({len(res)}/{minlen}) — запомнен кандидатом")
+        if len(res) > len(best_res):
+            best_res = res
+        return None
+
+    # 1) GigaChat (ключи нового аккаунта)
+    if not GIGACHAT_CLIENT_ID:
+        log("⚠️ gigachat: GIGACHAT_CLIENT_ID1 не передан в env!")
+    else:
+        log("🔄 Попытка: gigachat (GigaChat:latest)...")
+        r = take(ai_gigachat(prompt), "gigachat")
+        if r: return r
+    # 2) GitHub Models
     if not GH_AI_TOKEN:
         log("⚠️ github-models: GITHUB_TOKEN не передан! Добавьте в agent.yml: GITHUB_TOKEN: ${{ github.token }}")
     else:
         log("🔄 Попытка: github-models (gpt-4o-mini)...")
-        res = ai_github(prompt)
-        if res and len(res) >= minlen:
-            log(f"✅ Успех: github-models, {len(res)} симв.")
-            return res
+        r = take(ai_github(prompt), "github-models")
+        if r: return r
+    # 3) Cerebras
     if not CEREBRAS_KEY:
         log("⚠️ cerebras: CEREBRAS_KEY не передан в env!")
     else:
         log("🔄 Попытка: cerebras (llama-3.3-70b)...")
-        res = ai_cerebras(prompt)
-        if res and len(res) >= minlen:
-            log(f"✅ Успех: cerebras, {len(res)} симв.")
-            return res
+        r = take(ai_cerebras(prompt), "cerebras")
+        if r: return r
+    # 4) Mistral
     if not MISTRAL_KEY:
         log("⚠️ mistral: MISTRAL_KEY не передан в env!")
     else:
         log("🔄 Попытка: mistral (mistral-small)...")
-        res = ai_mistral(prompt)
-        if res and len(res) >= minlen:
-            log(f"✅ Успех: mistral, {len(res)} симв.")
-            return res
+        r = take(ai_mistral(prompt), "mistral")
+        if r: return r
+    # 5) Groq ×2
     for i, key in enumerate((GROQ_KEY, GROQ_KEY2)):
         if not key: continue
         log(f"🔄 Попытка: groq (llama-3.3-70b-versatile, ключ {i+1})...")
-        res = ai_groq(prompt, key)
-        if res and len(res) >= minlen:
-            log(f"✅ Успех: groq (ключ {i+1}), {len(res)} симв.")
-            return res
+        r = take(ai_groq(prompt, key), f"groq (ключ {i+1})")
+        if r: return r
+    # 6) OpenRouter ×4 ×2
     or_models = ["meta-llama/llama-3.3-70b-instruct:free",
                  "google/gemma-3-27b-it:free",
                  "deepseek/deepseek-chat-v3-0324:free",
@@ -185,10 +293,12 @@ def ai_call(prompt, minlen=400):
         if not key: continue
         for model in or_models:
             log(f"🔄 Попытка: openrouter ({model}, ключ {i+1})...")
-            res = ai_openrouter(prompt, model, key)
-            if res and len(res) >= minlen:
-                log(f"✅ Успех: openrouter ({model}, ключ {i+1}), {len(res)} симв.")
-                return res
+            r = take(ai_openrouter(prompt, model, key), f"openrouter ({model}, ключ {i+1})")
+            if r: return r
+
+    if best_res and len(best_res) >= 200:
+        log(f"ℹ️ Никто не дал {minlen} симв. — беру лучший кандидат ({len(best_res)} симв.) вместо фолбэка со страницы")
+        return best_res
     return None
 
 # ============================================================
@@ -231,7 +341,6 @@ def ensure_size(img_bytes, min_w=1000):
         return img_bytes
 
 def strip_watermark(img_bytes):
-    """Только для pollinations: срезаем нижнюю полосу 9% с логотипом."""
     try:
         im = Image.open(io.BytesIO(img_bytes))
         w, h = im.size
@@ -366,14 +475,13 @@ def choose_image(imgs, referer):
     return best
 
 # ============================================================
-# ГЕНЕРАЦИЯ КАРТИНОК v28: gpt-image-1 → dall-e-3 → HF router → pollinations
+# ГЕНЕРАЦИЯ КАРТИНОК: gpt-image-1 → dall-e-3 → HF router → pollinations
 # ============================================================
 
 def openai_image(prompt):
     if not OPENAI_KEY:
         return None
     full = prompt + ", photorealistic, high resolution, no text, no logos, no watermark"
-    # 1) gpt-image-1 (новый API: без response_format)
     try:
         r = requests.post("https://api.openai.com/v1/images/generations",
             headers={"Authorization": f"Bearer {OPENAI_KEY}", "Content-Type": "application/json"},
@@ -389,7 +497,6 @@ def openai_image(prompt):
             log(f"⚠️ OpenAI gpt-image-1: {str(r['error'])[:120]}")
     except Exception as e:
         log(f"⚠️ OpenAI gpt-image-1 ошибка: {e}")
-    # 2) dall-e-3 с b64
     try:
         r = requests.post("https://api.openai.com/v1/images/generations",
             headers={"Authorization": f"Bearer {OPENAI_KEY}", "Content-Type": "application/json"},
@@ -406,7 +513,6 @@ def openai_image(prompt):
             log(f"⚠️ OpenAI DALL-E 3: {str(r['error'])[:120]}")
     except Exception as e:
         log(f"⚠️ OpenAI ошибка: {e}")
-    # 3) dall-e-3 по url
     try:
         r = requests.post("https://api.openai.com/v1/images/generations",
             headers={"Authorization": f"Bearer {OPENAI_KEY}", "Content-Type": "application/json"},
@@ -487,12 +593,11 @@ def parse_text(r):
     chunks = re.findall(r"<p[^>]*>(.*?)</p>", tail, re.S | re.I)
     chunks += re.findall(r'<div[^>]+class=["\'][^"\']*(?:descr|text|content|detail|char)[^"\']*["\'][^>]*>(.*?)</div>', tail, re.S | re.I)
     raw = " ".join(clean(c) for c in chunks)
-    # v28: чистка UI-мусора ("- + × Выбрано максимальное...") + удаление дублей предложений
     seen = set()
     keep = []
     for s in raw.split(". "):
         s = s.strip()
-        s = re.sub(r"^[\s\-+×✕*•·|/\\—–]+", "", s).strip()   # срезаем "- + ×" в начале
+        s = re.sub(r"^[\s\-+×✕*•·|/\\—–]+", "", s).strip()
         s = re.sub(r"\s{2,}", " ", s)
         if len(s) < 30 or "{" in s:
             continue
@@ -537,7 +642,6 @@ def vk_get_album_id():
     return None
 
 def vk_upload_via_album(img_bytes):
-    """Сохранение в альбом через photos.save (photos.savePhotos не существует!)."""
     album = vk_get_album_id()
     if not album:
         log("ℹ️ ВК: путь 2 пропущен (нет VK_ALBUM_ID / vk_album.json)")
