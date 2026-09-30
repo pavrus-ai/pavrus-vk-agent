@@ -39,7 +39,7 @@ BL = ["корзин", "кабинет", "избранн", "сравнени", "�
 def log(msg):
     print(msg, flush=True)
 
-log("pavrus-vk-agent v41 (разные тексты для ВК и Дзена, фикс картинок)")
+log("pavrus-vk-agent v42 (фикс VK flood control и лимита 1024 симв в TG)")
 
 # ============================================================
 # PLAYWRIGHT
@@ -110,16 +110,13 @@ def brand_in_url(u):
     return any(b in path for b in BRAND_SLUGS)
 
 def ensure_size(img_bytes, min_w=1000):
-    """Увеличивает картинку если она меньше min_w"""
     try:
         im = Image.open(io.BytesIO(img_bytes))
         w, h = im.size
         log(f"📐 Исходный размер картинки: {w}x{h}px")
-        
         if w >= min_w:
             log(f"✅ Размер достаточный (≥{min_w}px)")
             return img_bytes
-        
         new_w, new_h = min_w, int(h * min_w / w)
         im = im.convert("RGB").resize((new_w, new_h), Image.LANCZOS)
         buf = io.BytesIO()
@@ -235,38 +232,44 @@ def ai_call(prompt, minlen=800):
     if res and len(res) >= minlen:
         log(f"✅ Успех: gigachat, {len(res)} симв.")
         return res
-    log("️ ИИ не ответил или ответил слишком коротко.")
+    log("⚠️ ИИ не ответил или ответил слишком коротко.")
     return None
 
 # ============================================================
-# ВК
+# ВК (с защитой от Flood Control)
 # ============================================================
-def vk_call(method, params, token):
+def vk_call(method, params, token, retries=3):
     p = dict(params or {})
     p["access_token"] = token
     p["v"] = VK_V
-    try:
-        r = requests.post(API + method, data=p, timeout=30).json()
-        if "error" in r:
-            log(f"⚠️ VK {method} error: {r['error']}")
-        return r.get("response")
-    except Exception as e:
-        log(f"⚠️ VK {method} exception: {e}")
-        return None
+    for attempt in range(retries):
+        try:
+            r = requests.post(API + method, data=p, timeout=30).json()
+            if "error" in r:
+                err = r["error"]
+                if err.get("error_code") == 9:  # Flood control
+                    delay = 5 * (attempt + 1)
+                    log(f"⚠️ VK Flood control. Ждем {delay} сек и пробуем снова...")
+                    time.sleep(delay)
+                    continue
+                log(f"⚠️ VK {method} error: {err}")
+                return None
+            return r.get("response")
+        except Exception as e:
+            log(f"⚠️ VK {method} exception: {e}")
+            time.sleep(2)
+    return None
 
 def vk_upload(img_bytes):
-    """Загрузка фото в ВК с детальным логом"""
     if not VK_USER_TOKEN:
         log("⚠️ VK_USER_TOKEN не задан!")
         return None
-    
     if not img_bytes:
         log("⚠️ Нет данных картинки для загрузки!")
         return None
         
     log(f"📤 Загрузка фото в ВК: {len(img_bytes)} байт")
     
-    # Проверяем формат картинки
     try:
         im = Image.open(io.BytesIO(img_bytes))
         log(f"📐 Формат: {im.format}, Размер: {im.size[0]}x{im.size[1]}, Режим: {im.mode}")
@@ -277,25 +280,17 @@ def vk_upload(img_bytes):
             img_bytes = buf.getvalue()
             log("✅ Конвертировано в RGB/JPEG")
     except Exception as e:
-        log(f"️ Ошибка проверки картинки: {e}")
+        log(f"⚠️ Ошибка проверки картинки: {e}")
     
     srv = vk_call("photos.getWallUploadServer", {"owner_id": "-" + VK_GROUP_ID}, VK_USER_TOKEN)
-    if not srv:
+    if not srv or "upload_url" not in srv:
         log("❌ Не получен upload server URL")
         return None
-    
-    if "upload_url" not in srv:
-        log(f"❌ Нет upload_url в ответе: {srv}")
-        return None
         
-    log(f"📤 Upload URL: {srv['upload_url'][:80]}...")
-    
     try:
         r = requests.post(srv["upload_url"], 
                          files={"photo": ("product.jpg", img_bytes, "image/jpeg")}, 
                          timeout=120)
-        log(f" Upload response: {r.status_code}, {len(r.content)} байт")
-        
         r_json = r.json()
         if not r_json.get("photo"):
             log(f"⚠️ Пустое photo в ответе: {r_json}")
@@ -306,9 +301,7 @@ def vk_upload(img_bytes):
               "server": r_json.get("server", ""), 
               "hash": r_json.get("hash", "")}
         
-        log(f"📤 Сохранение фото...")
         saved = vk_call("photos.saveWallPhoto", sp, VK_USER_TOKEN)
-        
         if saved:
             p = saved[0]
             att = f"photo{p['owner_id']}_{p['id']}"
@@ -319,21 +312,18 @@ def vk_upload(img_bytes):
         else:
             log("❌ photos.saveWallPhoto вернул None")
             return None
-            
     except Exception as e:
         log(f"❌ Ошибка загрузки фото: {e}")
-        import traceback
-        log(traceback.format_exc())
         return None
 
 def vk_post(message, att):
-    log(f" Публикация в ВК: {len(message)} симв., attachment: {att}")
+    log(f"📝 Публикация в ВК: {len(message)} симв., attachment: {att}")
     params = {"owner_id": "-" + VK_GROUP_ID, "message": message, "from_group": 1, "signed": 0}
     if att:
         params["attachments"] = att
         log(f"📎 Attachment: {att}")
     else:
-        log("️ Публикуем БЕЗ фото!")
+        log("⚠️ Публикуем БЕЗ фото!")
         
     res = vk_call("wall.post", params, VK_TOKEN)
     if res:
@@ -350,10 +340,19 @@ def tg_post(img_bytes, caption):
         
     log(f"📤 Отправка в TG: {len(caption)} симв., фото: {len(img_bytes) if img_bytes else 0} байт")
     
+    # Telegram строго ограничивает caption для фото 1024 символами!
     if img_bytes:
+        safe_caption = caption[:1020].rstrip()
         r = requests.post(f"https://api.telegram.org/bot{TG_BOT}/sendPhoto",
-            data={"chat_id": TG_CHAT, "caption": caption},
+            data={"chat_id": TG_CHAT, "caption": safe_caption},
             files={"photo": ("product.jpg", img_bytes, "image/jpeg")}, timeout=120).json()
+        
+        # Если текст был длиннее 1024, отправляем остаток отдельным сообщением
+        if len(caption) > 1024:
+            time.sleep(1)
+            rest_text = caption[1020:].strip()
+            requests.post(f"https://api.telegram.org/bot{TG_BOT}/sendMessage",
+                data={"chat_id": TG_CHAT, "text": rest_text}, timeout=60)
     else:
         r = requests.post(f"https://api.telegram.org/bot{TG_BOT}/sendMessage",
             data={"chat_id": TG_CHAT, "text": caption}, timeout=60).json()
@@ -418,7 +417,7 @@ def main():
         img = choose_image(imgs, u) if imgs else None
 
         if img:
-            img = ensure_size(img, 1000)  # Увеличиваем если нужно
+            img = ensure_size(img, 1000)
             page = u
             log(f"✅ Товар: {title[:60]}")
             break
@@ -432,10 +431,6 @@ def main():
     hist.add(page)
     json.dump(sorted(hist), open(HISTORY, "w", encoding="utf-8"), ensure_ascii=False)
 
-    # ========================================
-    # ГЕНЕРАЦИЯ ДВУХ ТЕКСТОВ: ДЛЯ ВК И ДЛЯ ДЗЕНА
-    # ========================================
-    
     # 1. КОРОТКИЙ ТЕКСТ ДЛЯ ВК (900-1200 символов)
     prompt_vk = (
         f"Напиши пост о товаре для ВКонтакте.\n\n"
@@ -457,13 +452,11 @@ def main():
     if not text_vk:
         text_vk = f"Современное оборудование для конференц-залов.\n\n{desc}\n\nНапишите нам в сообщения группы — расскажем подробнее!"
     
-    # Очистка текста для ВК
     text_vk = text_vk.replace("**", "").replace("##", "").strip()
-    text_vk = re.sub(r"^#.*\n", "", text_vk, flags=re.M)  # Удаляем заголовки
+    text_vk = re.sub(r"^#.*\n", "", text_vk, flags=re.M)
     text_vk = re.sub(r"https?://\S+", "", text_vk)
     text_vk = re.sub(r"pavrus\.ru\S*", "", text_vk, flags=re.I)
     
-    # Обрезаем до 1200 символов по последнему предложению
     if len(text_vk) > 1200:
         cut_pos = text_vk.rfind('.', 0, 1200)
         if cut_pos > 900:
@@ -474,7 +467,6 @@ def main():
     log(f"📝 Текст для ВК: {len(text_vk)} симв.")
 
     # 2. ДЛИННЫЙ ТЕКСТ ДЛЯ ДЗЕНА (1500-2500 символов)
-    # Этот текст вы можете копировать из ВК поста или генерировать отдельно
     prompt_dzen = (
         f"Напиши развернутую статью о товаре для Яндекс.Дзен.\n\n"
         f"ТОВАР: {title}\n"
@@ -490,17 +482,14 @@ def main():
         f"7. БЕЗ хэштегов и ссылок."
     )
     
-    # Генерируем длинный текст (можно закомментировать если не нужно)
     text_dzen = ai_call(prompt_dzen, 1500)
     if text_dzen:
         text_dzen = text_dzen.replace("**", "").replace("##", "").strip()
         text_dzen = re.sub(r"^#.*\n", "", text_dzen, flags=re.M)
         text_dzen = re.sub(r"https?://\S+", "", text_dzen)
-        log(f"📝 Текст для Дзена: {len(text_dzen)} симв. (сохраните для ручной публикации)")
+        log(f"📝 Текст для Дзена: {len(text_dzen)} симв. (скопируйте из логов для ручной публикации)")
 
-    # ========================================
     # ПУБЛИКАЦИЯ
-    # ========================================
     att = vk_upload(img) if img else None
     log(f"📎 Attachment для ВК: {att if att else 'None'}")
     
