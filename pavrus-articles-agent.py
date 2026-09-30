@@ -32,7 +32,7 @@ SITE = "https://pavrus.ru"
 HISTORY = "articles_history.json"
 CACHE = "sitemap_cache.json"
 
-UA = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"}
+UA = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
 BRAND_SLUG = "pavrus"
 
 EMOJI_RE = re.compile(
@@ -79,7 +79,7 @@ def select_seeds():
 def log(msg):
     print(msg, flush=True)
 
-log("pavrus-articles-agent v14 (Playwright, локальный кэш, без пробелов)")
+log("pavrus-articles-agent v16 (Playwright, локальный кэш, строгая очистка заголовков)")
 
 # ============================================================
 # PLAYWRIGHT: обход JS-защиты Beget
@@ -305,7 +305,6 @@ def parse_page(html_text):
     return h1, desc, ". ".join(keep)[:1500]
 
 def pick_page(urls, hist):
-    """Выбираем страницу из кэша, скачиваем через Playwright"""
     avail = [u for u in urls if u not in hist] or urls
     random.shuffle(avail)
     
@@ -342,30 +341,39 @@ def generate_headings_and_titles(title, desc, seeds):
         "features": seeds["features"], "advantages": seeds["advantages"],
         "usage": seeds["usage"], "conclusion": seeds["conclusion"],
     }
+    
     prompt = (
-        f"Ты — эксперт по профессиональному AV-оборудованию PAVRUS и редактор делового издания.\n"
+        f"Ты — эксперт по профессиональному AV-оборудованию PAVRUS.\n"
         f"Придумай для статьи о товаре:\n"
-        f"- уникальный заголовок СТАТЬИ (предложением, 8-14 слов, обычные буквы, без markdown и кавычек)\n"
-        f"- уникальный заголовок НОВОСТИ (предложением, 6-10 слов, обычные буквы, без markdown и кавычек)\n"
-        f"- 6 развёрнутых подзаголовков разделов статьи (5-10 слов каждый) на основе затравок.\n\n"
+        f"1. Заголовок статьи (8-14 слов)\n"
+        f"2. Заголовок новости (6-10 слов)\n"
+        f"3-8. Шесть подзаголовков разделов (5-10 слов каждый) на основе затравок.\n\n"
         f"ТОВАР: {title}\nОПИСАНИЕ: {desc}\n\n"
-        f"ЗАТРАВКИ ПОДЗАГОЛОВКОВ:\n"
-        f"1. {seeds['what_is']}\n2. {seeds['purpose']}\n3. {seeds['features']}\n"
+        f"ЗАТРАВКИ:\n1. {seeds['what_is']}\n2. {seeds['purpose']}\n3. {seeds['features']}\n"
         f"4. {seeds['advantages']}\n5. {seeds['usage']}\n6. {seeds['conclusion']}\n\n"
-        f"ТРЕБОВАНИЯ: заголовки и подзаголовки конкретные, упоминают товар или его особенность, "
-        f"без слов «инновационный» и «революционный».\n"
-        f"Формат ответа СТРОГО 8 строк без нумерации и лишних слов:\n"
-        f"заголовок статьи\nзаголовок новости\nподзаголовок 1\nподзаголовок 2\n"
-        f"подзаголовок 3\nподзаголовок 4\nподзаголовок 5\nподзаголовок 6\n"
+        f"КРИТИЧЕСКИ ВАЖНО: Ответь СТРОГО 8 строками текста. БЕЗ markdown, БЕЗ символов #, *, БЕЗ нумерации (1., 2.), БЕЗ вводных слов типа 'Вот заголовки'. Просто 8 строк текста."
     )
+    
     result = gigachat_chat(prompt, GIGACHAT_MODEL or "GigaChat:latest")
     if not result:
-        log("Заголовки не сгенерированы — использую запасные")
+        log("⚠️ Заголовки не сгенерированы — использую запасные")
         return fallback
-    lines = [clean_plain(l) for l in result.split("\n") if clean_plain(l)]
+
+    lines = []
+    for l in result.split("\n"):
+        l = clean_plain(l).strip()
+        # Игнорируем пустые строки, markdown и нумерацию
+        if not l or l.startswith(("#", "*", "-", "1.", "2.", "3.", "4.", "5.", "6.", "7.", "8.")):
+            continue
+        # Игнорируем мусорные фразы ИИ
+        if "заголовок" in l.lower() and len(l) < 30:
+            continue
+        lines.append(l)
+
     if len(lines) < 8:
-        log(f"ИИ вернул {len(lines)} строк вместо 8 — использую запасные")
+        log(f"⚠️ ИИ вернул {len(lines)} чистых строк вместо 8 — использую запасные")
         return fallback
+
     out = {
         "article_title": lines[0][:120],
         "news_title": lines[1][:100],
@@ -373,8 +381,9 @@ def generate_headings_and_titles(title, desc, seeds):
         "features": lines[4][:80], "advantages": lines[5][:80],
         "usage": lines[6][:80], "conclusion": lines[7][:80],
     }
-    log(f"Заголовок статьи: {out['article_title']}")
-    log(f"Заголовок новости: {out['news_title']}")
+    
+    log(f"📰 Заголовок статьи: {out['article_title']}")
+    log(f"📰 Заголовок новости: {out['news_title']}")
     return out
 
 # ============================================================
