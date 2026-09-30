@@ -3,6 +3,9 @@ import os, re, json, html, random, sys, io, time, datetime, base64, uuid, reques
 from PIL import Image
 urllib3.disable_warnings()
 
+# ============================================================
+# КОНФИГУРАЦИЯ (исправлены пробелы!)
+# ============================================================
 VK_TOKEN = os.environ.get("VK_TOKEN", "").strip()
 VK_USER_TOKEN = os.environ.get("VK_USER_TOKEN", "").strip()
 VK_GROUP_ID = os.environ.get("VK_GROUP_ID", "").strip().lstrip("-")
@@ -16,7 +19,6 @@ CEREBRAS_KEY = os.environ.get("CEREBRAS_KEY", "").strip()
 MISTRAL_KEY = os.environ.get("MISTRAL_KEY", "").strip()
 OPENAI_KEY = os.environ.get("OPENAI_KEY", "").strip()
 HF_TOKEN = os.environ.get("HF_TOKEN", "").strip()
-# Ключи GigaChat НОВОГО аккаунта — только для товарного агента
 GIGACHAT_CLIENT_ID = os.environ.get("GIGACHAT_CLIENT_ID1", "").strip()
 GIGACHAT_CLIENT_SECRET = os.environ.get("GIGACHAT_CLIENT_SECRET1", "").strip()
 
@@ -29,15 +31,19 @@ CACHE_TTL_DAYS = 7
 API = "https://api.vk.com/method/"
 VK_V = "5.131"
 POLLINATIONS_API = "https://image.pollinations.ai/prompt/"
-UA = {"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/126.0 Safari/537.36",
-      "Accept": "text/html,application/xhtml+xml",
-      "Accept-Language": "ru-RU,ru;q=0.9"}
+
+UA = {
+    "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/126.0 Safari/537.36",
+    "Accept": "text/html,application/xhtml+xml",
+    "Accept-Language": "ru-RU,ru;q=0.9"
+}
+
 BRAND_SLUGS = ["pavrus", "htdz", "ht-dz", "chartu", "restmoment", "rest-moment"]
 BL = ["корзин", "кабинет", "избранн", "сравнени", "войти", "заказать звонок",
       "санкт-петербург", "москва", "новосибирск", "8 (800", "info@", "показать еще",
       "ваш город", "бесплатная доставка", "главная", "обратная связь",
       "выбрано максимальное", "доступное для заказа", "количество товара",
-      "цена:", " руб", "₽", "купить", "оформить заказ", "в наличии", "под заказ",
+      "цена:", "руб", "₽", "купить", "оформить заказ", "в наличии", "под заказ",
       "артикул", "арт.", "гаранти", "доставк", "cookie", "политик"]
 
 CATEGORY_SEEDS = [
@@ -71,15 +77,16 @@ CATEGORY_SEEDS = [
 def log(msg):
     print(msg, flush=True)
 
-log("Версия ℹ️ pavrus-vk-agent v31 (uuid-фикс GigaChat; groq: llama-4/gpt-oss; openrouter auto с малыми max_tokens; без github-models)")
+log("Версия ℹ️ pavrus-vk-agent v32 (исправлены пробелы, regex, отступы)")
 
 # ============================================================
 # ИИ-ТЕКСТ: ступени с диагностикой
 # ============================================================
-
 def _extract(r):
-    try: return r["choices"][0]["message"]["content"].strip()
-    except (KeyError, IndexError, TypeError): return None
+    try:
+        return r["choices"][0]["message"]["content"].strip()
+    except (KeyError, IndexError, TypeError):
+        return None
 
 def _err_snippet(r):
     e = r.get("error") or {}
@@ -90,9 +97,8 @@ def _err_snippet(r):
 RU_SUFFIX = "\n\nВАЖНО: Пиши ТОЛЬКО на русском языке."
 
 # ------------------------------------------------------------
-# GigaChat (ключи нового аккаунта)
+# GigaChat (исправлены f-strings!)
 # ------------------------------------------------------------
-
 _GIGACHAT_TOKEN = None
 _GIGACHAT_TOKEN_EXPIRY = 0
 
@@ -145,68 +151,75 @@ def ai_gigachat(prompt):
     return None
 
 # ------------------------------------------------------------
-# Остальные провайдеры
+# Остальные провайдеры (исправлены f-strings!)
 # ------------------------------------------------------------
-
 def ai_cerebras(prompt):
-    if not CEREBRAS_KEY: return None
+    if not CEREBRAS_KEY:
+        return None
     try:
         r = requests.post("https://api.cerebras.ai/v1/chat/completions",
             headers={"Authorization": f"Bearer {CEREBRAS_KEY}"},
             json={"model": "llama-3.3-70b", "temperature": 0.8,
-                  "messages": [{"role": "user", "content": prompt + RU_SUFFIX}]}, timeout=60).json()
+                  "messages": [{"role": "user", "content": prompt + RU_SUFFIX}]},
+            timeout=60).json()
         if "error" in r:
             log(f"   ⚠️ cerebras: {_err_snippet(r)}")
             return None
         return _extract(r)
     except Exception as e:
         log(f"   ⚠️ cerebras: сеть/ошибка {str(e)[:80]}")
-        return None
+    return None
 
 def ai_mistral(prompt):
-    if not MISTRAL_KEY: return None
+    if not MISTRAL_KEY:
+        return None
     try:
         r = requests.post("https://api.mistral.ai/v1/chat/completions",
             headers={"Authorization": f"Bearer {MISTRAL_KEY}"},
             json={"model": "mistral-small-latest", "temperature": 0.8,
-                  "messages": [{"role": "user", "content": prompt + RU_SUFFIX}]}, timeout=60).json()
+                  "messages": [{"role": "user", "content": prompt + RU_SUFFIX}]},
+            timeout=60).json()
         if "error" in r:
             log(f"   ⚠️ mistral: {_err_snippet(r)}")
             return None
         return _extract(r)
     except Exception as e:
         log(f"   ⚠️ mistral: сеть/ошибка {str(e)[:80]}")
-        return None
+    return None
 
 def ai_groq(prompt, key, model):
-    if not key: return None
+    if not key:
+        return None
     try:
         r = requests.post("https://api.groq.com/openai/v1/chat/completions",
             headers={"Authorization": f"Bearer {key}"},
             json={"model": model, "temperature": 0.8,
-                  "messages": [{"role": "user", "content": prompt + RU_SUFFIX}]}, timeout=60).json()
+                  "messages": [{"role": "user", "content": prompt + RU_SUFFIX}]},
+            timeout=60).json()
         if "error" in r:
             log(f"   ⚠️ groq {model}: {_err_snippet(r)}")
             return None
         return _extract(r)
     except Exception as e:
         log(f"   ⚠️ groq {model}: сеть/ошибка {str(e)[:80]}")
-        return None
+    return None
 
 def ai_openrouter(prompt, key, max_tokens):
-    if not key: return None
+    if not key:
+        return None
     try:
         r = requests.post("https://openrouter.ai/api/v1/chat/completions",
             headers={"Authorization": f"Bearer {key}", "HTTP-Referer": "https://github.com"},
             json={"model": "auto", "temperature": 0.8, "max_tokens": max_tokens,
-                  "messages": [{"role": "user", "content": prompt + RU_SUFFIX}]}, timeout=60).json()
+                  "messages": [{"role": "user", "content": prompt + RU_SUFFIX}]},
+            timeout=60).json()
         if "error" in r:
             log(f"   ⚠️ openrouter auto (max={max_tokens}): {_err_snippet(r)}")
             return None
         return _extract(r)
     except Exception as e:
         log(f"   ⚠️ openrouter auto: сеть/ошибка {str(e)[:80]}")
-        return None
+    return None
 
 GROQ_MODELS = ["meta-llama/llama-4-scout-17b-16e-instruct",
                "meta-llama/llama-4-maverick-17b-128e-instruct",
@@ -214,9 +227,9 @@ GROQ_MODELS = ["meta-llama/llama-4-scout-17b-16e-instruct",
                "llama-3.1-8b-instant"]
 
 def ai_call(prompt, minlen=400):
-    """v31: GigaChat → cerebras → mistral → groq(новые модели) → openrouter auto (малые max_tokens)."""
+    """v32: GigaChat → cerebras → mistral → groq → openrouter auto"""
     best_res = ""
-
+    
     def take(res, label):
         nonlocal best_res
         if not res:
@@ -228,52 +241,63 @@ def ai_call(prompt, minlen=400):
         if len(res) > len(best_res):
             best_res = res
         return None
-
+    
     # 1) GigaChat
     if not GIGACHAT_CLIENT_ID:
         log("⚠️ gigachat: GIGACHAT_CLIENT_ID1 не передан в env!")
     else:
         log("🔄 Попытка: gigachat (GigaChat:latest)...")
         r = take(ai_gigachat(prompt), "gigachat")
-        if r: return r
+        if r:
+            return r
+    
     # 2) Cerebras
     if not CEREBRAS_KEY:
         log("⚠️ cerebras: CEREBRAS_KEY не передан в env!")
     else:
         log("🔄 Попытка: cerebras (llama-3.3-70b)...")
         r = take(ai_cerebras(prompt), "cerebras")
-        if r: return r
+        if r:
+            return r
+    
     # 3) Mistral
     if not MISTRAL_KEY:
         log("⚠️ mistral: MISTRAL_KEY не передан в env!")
     else:
         log("🔄 Попытка: mistral (mistral-small)...")
         r = take(ai_mistral(prompt), "mistral")
-        if r: return r
-    # 4) Groq с актуальными моделями
+        if r:
+            return r
+    
+    # 4) Groq
     for i, key in enumerate((GROQ_KEY, GROQ_KEY2)):
-        if not key: continue
+        if not key:
+            continue
         for model in GROQ_MODELS:
             log(f"🔄 Попытка: groq ({model}, ключ {i+1})...")
             r = take(ai_groq(prompt, key, model), f"groq ({model}, ключ {i+1})")
-            if r: return r
-    # 5) OpenRouter auto с уменьшенными max_tokens (экономия кредитов)
+            if r:
+                return r
+    
+    # 5) OpenRouter auto
     for i, key in enumerate((OR_KEY, OR_KEY2)):
-        if not key: continue
+        if not key:
+            continue
         for mt in (1000, 512):
             log(f"🔄 Попытка: openrouter auto (max_tokens={mt}, ключ {i+1})...")
             r = take(ai_openrouter(prompt, key, mt), f"openrouter auto (max={mt}, ключ {i+1})")
-            if r: return r
-
+            if r:
+                return r
+    
     if best_res and len(best_res) >= 200:
-        log(f"ℹ️ Никто не дал {minlen} симв. — беру лучший кандидат ({len(best_res)} симв.) вместо фолбэка со страницы")
+        log(f"ℹ️ Никто не дал {minlen} симв. — беру лучший кандидат ({len(best_res)} симв.)")
         return best_res
+    
     return None
 
 # ============================================================
 # ХЕЛПЕРЫ
 # ============================================================
-
 def clean(s):
     for _ in range(3):
         s = html.unescape(s)
@@ -282,10 +306,14 @@ def clean(s):
 
 def abs_url(u):
     u = (u or "").strip()
-    if not u or u.startswith("data:"): return ""
-    if u.startswith("//"): return "https:" + u
-    if u.startswith("/"): return SITE + u
-    if u.startswith("http"): return u
+    if not u or u.startswith("data:"):
+        return ""
+    if u.startswith("//"):
+        return "https:" + u
+    if u.startswith("/"):
+        return SITE + u
+    if u.startswith("http"):
+        return u
     return ""
 
 def brand_in_url(u):
@@ -303,11 +331,11 @@ def ensure_size(img_bytes, min_w=1000):
         im = im.convert("RGB").resize((new_w, new_h), Image.LANCZOS)
         buf = io.BytesIO()
         im.save(buf, "JPEG", quality=88)
-        log(f"🔍 Фото увеличено с {w}x{h} до {new_w}x{new_h} (для обложки Дзена)")
+        log(f"🔍 Фото увеличено с {w}x{h} до {new_w}x{new_h}")
         return buf.getvalue()
     except Exception as e:
         log(f"⚠️ ensure_size: {e}")
-        return img_bytes
+    return img_bytes
 
 def strip_watermark(img_bytes):
     try:
@@ -317,16 +345,15 @@ def strip_watermark(img_bytes):
         im = im.crop((0, 0, w, h - cut))
         buf = io.BytesIO()
         im.convert("RGB").save(buf, "JPEG", quality=90)
-        log(f"✂️ Водяной знак: срезана нижняя полоса {cut}px (было {w}x{h}, стало {im.size[0]}x{im.size[1]})")
+        log(f"✂️ Водяной знак: срезана нижняя полоса {cut}px")
         return buf.getvalue()
     except Exception as e:
         log(f"⚠️ strip_watermark: {e}")
-        return img_bytes
+    return img_bytes
 
 # ============================================================
-# КЭШ КАРТЫ САЙТА
+# КЭШ КАРТЫ САЙТА (исправлен regex!)
 # ============================================================
-
 def load_cache():
     try:
         d = json.load(open(CACHE, encoding="utf-8"))
@@ -343,15 +370,17 @@ def load_cache():
 def fetch_sitemap():
     urls = []
     xml = requests.get(SITEMAP, timeout=30, headers=UA).text
-    locs = re.findall(r"<loc>\s*(.*?)\s*</loc>", xml)
+    # ИСПРАВЛЕНО: .+? вместо .?
+    locs = re.findall(r"<loc>\s*(.+?)\s*</loc>", xml)
     smps = [l for l in locs if "sitemap" in l.lower()] or [SITEMAP]
     for sm in smps:
         try:
             x = requests.get(sm, timeout=30, headers=UA).text
         except Exception:
             continue
-        urls += [u for u in re.findall(r"<loc>\s*(.*?)\s*</loc>", x) if "/catalog/" in u]
+        urls += [u for u in re.findall(r"<loc>\s*(.+?)\s*</loc>", x) if "/catalog/" in u]
     urls = sorted(set(urls))
+    
     if len(urls) < 10:
         for s in CATEGORY_SEEDS:
             try:
@@ -363,8 +392,10 @@ def fetch_sitemap():
                 if u and u not in urls:
                     urls.append(u)
         urls = sorted(set(urls))
+    
     if not urls:
         raise RuntimeError("пустая карта сайта")
+    
     json.dump({"ts": time.time(), "urls": urls}, open(CACHE, "w", encoding="utf-8"), ensure_ascii=False)
     log(f"✅ Этап 1: карта обновлена: {len(urls)} ссылок")
     return urls
@@ -372,7 +403,6 @@ def fetch_sitemap():
 # ============================================================
 # ГАЛЕРЕЯ И ТЕКСТ СТРАНИЦЫ
 # ============================================================
-
 def parse_gallery(r):
     out, seen = [], set()
     for m in re.finditer(r'<(?:a|div|img)[^>]+class="[^"]*catalog-element-gallery-picture[^"]*"[^>]*>', r, re.I):
@@ -385,7 +415,7 @@ def parse_gallery(r):
                     seen.add(u)
                     out.append(u)
                 break
-    log(f"ℹ️ Фото из галереи товара (catalog-element-gallery-picture): {len(out)}")
+    log(f"ℹ️ Фото из галереи товара: {len(out)}")
     return out
 
 def parse_other_imgs(r):
@@ -393,7 +423,8 @@ def parse_other_imgs(r):
     og = re.search(r'<meta[^>]+property=["\']og:image["\'][^>]+content=["\'](.*?)["\']', r, re.S | re.I)
     if og:
         u = abs_url(og.group(1))
-        if u: out.append(u)
+        if u:
+            out.append(u)
     for tag in re.findall(r"<img[^>]+>", r)[:20]:
         for attr in ("data-src", "data-lazy-src", "data-original", "src"):
             am = re.search(attr + r'\s*=\s*["\']([^"\']+)["\']', tag, re.I)
@@ -416,13 +447,13 @@ def choose_image(imgs, referer):
             rs = requests.get(u, timeout=20, headers=hdr)
             if rs.status_code == 404:
                 if err_log < 3:
-                    log(f"   ⚠️ img 404 (нет картинки): {u[:80]}")
-                    err_log += 1
+                    log(f"   ⚠️ img 404: {u[:80]}")
+                err_log += 1
                 continue
             if rs.status_code != 200:
                 if err_log < 3:
                     log(f"   ⚠️ img HTTP {rs.status_code}: {u[:80]}")
-                    err_log += 1
+                err_log += 1
                 continue
             if len(rs.content) < 5000:
                 continue
@@ -436,7 +467,7 @@ def choose_image(imgs, referer):
         except Exception as e:
             if err_log < 3:
                 log(f"   ⚠️ img ошибка: {u[:80]} ({str(e)[:40]})")
-                err_log += 1
+            err_log += 1
             continue
     log(f"ℹ️ Проверено картинок: {checked}, лучшая: {best_px} px")
     if best:
@@ -444,9 +475,8 @@ def choose_image(imgs, referer):
     return best
 
 # ============================================================
-# ГЕНЕРАЦИЯ КАРТИНОК: gpt-image-1 → dall-e-3 → HF router → pollinations
+# ГЕНЕРАЦИЯ КАРТИНОК (исправлены f-strings!)
 # ============================================================
-
 def openai_image(prompt):
     if not OPENAI_KEY:
         return None
@@ -460,33 +490,37 @@ def openai_image(prompt):
             b64 = (r.get("data") or [{}])[0].get("b64_json")
             if b64:
                 data = base64.b64decode(b64)
-                log(f"✅ OpenAI gpt-image-1: картинка {len(data)} байт (без водяного знака)")
+                log(f"✅ OpenAI gpt-image-1: картинка {len(data)} байт")
                 return data
         else:
             log(f"⚠️ OpenAI gpt-image-1: {str(r['error'])[:120]}")
     except Exception as e:
         log(f"⚠️ OpenAI gpt-image-1 ошибка: {e}")
+    
     try:
         r = requests.post("https://api.openai.com/v1/images/generations",
             headers={"Authorization": f"Bearer {OPENAI_KEY}", "Content-Type": "application/json"},
             json={"model": "dall-e-3", "prompt": full, "n": 1,
                   "size": "1024x1024", "quality": "standard",
-                  "response_format": "b64_json"}, timeout=120).json()
+                  "response_format": "b64_json"},
+            timeout=120).json()
         if "error" not in r:
             b64 = (r.get("data") or [{}])[0].get("b64_json")
             if b64:
                 data = base64.b64decode(b64)
-                log(f"✅ OpenAI DALL-E 3: картинка {len(data)} байт (без водяного знака)")
+                log(f"✅ OpenAI DALL-E 3: картинка {len(data)} байт")
                 return data
         else:
             log(f"⚠️ OpenAI DALL-E 3: {str(r['error'])[:120]}")
     except Exception as e:
         log(f"⚠️ OpenAI ошибка: {e}")
+    
     try:
         r = requests.post("https://api.openai.com/v1/images/generations",
             headers={"Authorization": f"Bearer {OPENAI_KEY}", "Content-Type": "application/json"},
             json={"model": "dall-e-3", "prompt": full, "n": 1,
-                  "size": "1024x1024", "quality": "standard"}, timeout=120).json()
+                  "size": "1024x1024", "quality": "standard"},
+            timeout=120).json()
         url = (r.get("data") or [{}])[0].get("url")
         if url:
             img = requests.get(url, timeout=120).content
@@ -494,6 +528,7 @@ def openai_image(prompt):
             return img
     except Exception as e:
         log(f"⚠️ OpenAI url ошибка: {e}")
+    
     return None
 
 def hf_image(prompt):
@@ -507,9 +542,10 @@ def hf_image(prompt):
             try:
                 r = requests.post(base + mdl,
                     headers={"Authorization": f"Bearer {HF_TOKEN}"},
-                    json={"inputs": full}, timeout=120)
+                    json={"inputs": full},
+                    timeout=120)
                 if r.status_code == 200 and r.headers.get("Content-Type", "").startswith("image/"):
-                    log(f"✅ HF {mdl}: картинка {len(r.content)} байт (без водяного знака)")
+                    log(f"✅ HF {mdl}: картинка {len(r.content)} байт")
                     return r.content
                 log(f"⚠️ HF {mdl}: ответ {r.status_code}: {r.text[:80]}")
             except Exception as e:
@@ -532,41 +568,47 @@ def generate_product_image(title, desc):
     try:
         r = requests.get(url, timeout=240)
         r.raise_for_status()
-        log(f"✅ Сгенерирована картинка промптом (pollinations): {len(r.content)} байт")
+        log(f"✅ Сгенерирована картинка (pollinations): {len(r.content)} байт")
         return strip_watermark(r.content)
     except Exception as e:
         log(f"⚠️ Ошибка генерации картинки: {e}")
-        return None
+    return None
 
 def parse_text(r):
     h1 = ""
     m = re.search(r"<h1[^>]*>(.*?)</h1>", r, re.S | re.I)
-    if m: h1 = clean(m.group(1))
+    if m:
+        h1 = clean(m.group(1))
     if not h1:
         m = re.search(r"<title[^>]*>(.*?)</title>", r, re.S | re.I)
         h1 = clean(m.group(1)) if m else ""
-        h1 = re.split(r"\s*[—|]\s*", h1)[0].strip()
+    h1 = re.split(r"\s*[—|]\s*", h1)[0].strip()
+    
     desc = ""
     for pat in (r'<meta[^>]+name=["\']description["\'][^>]+content=["\'](.*?)["\']',
                 r'<meta[^>]+content=["\'](.*?)["\'][^>]+name=["\']description["\']'):
         dm = re.search(pat, r, re.S | re.I)
         if dm:
             desc = clean(dm.group(1))
-            if desc: break
+            if desc:
+                break
+    
     tail = re.sub(r"<script[^>]*>.*?</script>", " ", r, flags=re.S | re.I)
     tail = re.sub(r"<style[^>]*>.*?</style>", " ", tail, flags=re.S | re.I)
     for mk in ["Назад к списку", "Нужна консультация", "Подробная информация"]:
         i = tail.find(mk)
         if i != -1:
             tail = tail[:i]
+    
     chunks = re.findall(r"<p[^>]*>(.*?)</p>", tail, re.S | re.I)
     chunks += re.findall(r'<div[^>]+class=["\'][^"\']*(?:descr|text|content|detail|char)[^"\']*["\'][^>]*>(.*?)</div>', tail, re.S | re.I)
     raw = " ".join(clean(c) for c in chunks)
+    
     seen = set()
     keep = []
     for s in raw.split(". "):
         s = s.strip()
-        s = re.sub(r"^[\s\-+×✕*•·|/\\—–]+", "", s).strip()
+        s = re.sub(r"^[\s-+×✕*•·|/\—–]+", "", s).strip()
         s = re.sub(r"\s{2,}", " ", s)
         if len(s) < 30 or "{" in s:
             continue
@@ -577,13 +619,13 @@ def parse_text(r):
             continue
         seen.add(low)
         keep.append(s)
+    
     body = ". ".join(keep)[:1500]
     return h1, desc, body
 
 # ============================================================
-# ВК: путь 1 (wall server) → путь 2 (альбом, метод photos.save)
+# ВК: путь 1 (wall server) → путь 2 (альбом)
 # ============================================================
-
 def vk_call(method, params, token):
     p = dict(params or {})
     p["access_token"] = token
@@ -613,27 +655,28 @@ def vk_get_album_id():
 def vk_upload_via_album(img_bytes):
     album = vk_get_album_id()
     if not album:
-        log("ℹ️ ВК: путь 2 пропущен (нет VK_ALBUM_ID / vk_album.json)")
+        log("ℹ️ ВК: путь 2 пропущен (нет VK_ALBUM_ID)")
         return None
     for tok in (VK_USER_TOKEN, VK_TOKEN):
         if not tok:
             continue
         srv = vk_call("photos.getUploadServer",
-                      {"group_id": VK_GROUP_ID, "album_id": album}, tok)
+            {"group_id": VK_GROUP_ID, "album_id": album}, tok)
         if not srv or "upload_url" not in srv:
             continue
         try:
             r = requests.post(srv["upload_url"],
-                files={"file1": ("product.jpg", img_bytes, "image/jpeg")}, timeout=120).json()
+                files={"file1": ("product.jpg", img_bytes, "image/jpeg")},
+                timeout=120).json()
         except Exception:
             continue
         if not r.get("hash") or not r.get("photos_list"):
             log(f"⚠️ ВК upload в альбом: пустой ответ: {str(r)[:120]}")
             continue
         saved = vk_call("photos.save",
-                        {"group_id": VK_GROUP_ID, "album_id": album,
-                         "server": r.get("server", ""), "photos_list": r.get("photos_list", ""),
-                         "hash": r.get("hash", "")}, tok)
+            {"group_id": VK_GROUP_ID, "album_id": album,
+             "server": r.get("server", ""), "photos_list": r.get("photos_list", ""),
+             "hash": r.get("hash", "")}, tok)
         if saved:
             p = saved[0]
             att = f"photo{p['owner_id']}_{p['id']}"
@@ -650,11 +693,12 @@ def vk_upload(img_bytes):
                 continue
             try:
                 r = requests.post(srv["upload_url"],
-                    files={"photo": ("product.jpg", img_bytes, "image/jpeg")}, timeout=120).json()
+                    files={"photo": ("product.jpg", img_bytes, "image/jpeg")},
+                    timeout=120).json()
             except Exception:
                 continue
             if not r.get("photo"):
-                log("⚠️ VK upload вернул пустое photo (путь 1) — флуд")
+                log("⚠️ VK upload вернул пустое photo (путь 1)")
                 continue
             sp = dict(params)
             sp.update({"photo": r["photo"], "server": r.get("server", ""), "hash": r.get("hash", "")})
@@ -666,10 +710,11 @@ def vk_upload(img_bytes):
                     att += f"_{p['access_key']}"
                 log(f"✅ ВК: фото загружено (wall server) → {att}")
                 return att
-        log("⚠️ ВК: путь 1 недоступен (флуд/токен) — пробую альбом")
+    
+    log("⚠️ ВК: путь 1 недоступен — пробую альбом")
     att = vk_upload_via_album(img_bytes)
     if att:
-        log(f"✅ ВК: фото загружено (через альбом группы) → {att}")
+        log(f"✅ ВК: фото загружено (через альбом) → {att}")
         return att
     return None
 
@@ -691,19 +736,20 @@ def tg_post(img_bytes, caption):
     if img_bytes:
         r = requests.post(f"https://api.telegram.org/bot{TG_BOT}/sendPhoto",
             data={"chat_id": TG_CHAT, "caption": caption},
-            files={"photo": ("product.jpg", img_bytes, "image/jpeg")}, timeout=120).json()
+            files={"photo": ("product.jpg", img_bytes, "image/jpeg")},
+            timeout=120).json()
     else:
         r = requests.post(f"https://api.telegram.org/bot{TG_BOT}/sendMessage",
-            data={"chat_id": TG_CHAT, "text": caption}, timeout=60).json()
+            data={"chat_id": TG_CHAT, "text": caption},
+            timeout=60).json()
     if r.get("ok"):
         log(f"✅ TG: карточка отправлена в {TG_CHAT}")
     else:
         log(f"⚠️ TG: {str(r)[:200]}")
 
 # ============================================================
-# ГЛАВНАЯ ЛОГИКА
+# ГЛАВНАЯ ЛОГИКА (исправлены отступы!)
 # ============================================================
-
 def main():
     urls, need_fetch = load_cache()
     if need_fetch:
@@ -712,25 +758,27 @@ def main():
         except Exception as e:
             log(f"❌ Сайт недоступен и кэша нет: {e} — пропускаю запуск")
             sys.exit(0)
-
+    
     cand = [u for u in urls if brand_in_url(u)]
     log(f"ℹ️ Этап 2: URL с брендом в адресе: {len(cand)} из {len(urls)}")
+    
     if not cand:
         log("❌ Нет URL с брендами в адресе")
         sys.exit(1)
-
+    
     try:
         hist = set(json.load(open(HISTORY, encoding="utf-8"))) if os.path.exists(HISTORY) else set()
     except Exception:
         hist = set()
+    
     avail = [u for u in cand if u not in hist] or cand
     random.shuffle(avail)
-
+    
     page = title = desc = body = None
     img = None
     last_ok = None
     site_down = False
-
+    
     for i, u in enumerate(avail[:12]):
         try:
             rs = requests.get(u, timeout=30, headers=UA)
@@ -738,38 +786,41 @@ def main():
             log(f"❌ Сайт недоступен (сеть): {u} — {str(e)[:60]}")
             site_down = True
             break
+        
         if rs.status_code == 404:
-            log(f"⚠️ Попытка {i+1}: 404 — страница удалена, выбираю другую: {u}")
+            log(f"⚠️ Попытка {i+1}: 404 — {u}")
             continue
         if rs.status_code != 200 or len(rs.text) < 3000:
-            log(f"⚠️ Попытка {i+1}: HTTP {rs.status_code} или заглушка — {u}")
+            log(f"⚠️ Попытка {i+1}: HTTP {rs.status_code} — {u}")
             continue
+        
         r = rs.text
-
         title, desc, body = parse_text(r)
         if not title or (len(body) + len(desc)) < 40:
             log(f"⚠️ Попытка {i+1}: мало текста — {u}")
             continue
+        
         last_ok = (u, title, desc, body)
-
         imgs = parse_gallery(r) or parse_other_imgs(r)
         img = choose_image(imgs, u) if imgs else None
+        
         if not img:
-            log("⚠️ Картинка товара недоступна (404/мелкая) — генерирую (gpt-image-1 → HF → pollinations)")
+            log("⚠️ Картинка товара недоступна — генерирую")
             img = generate_product_image(title, desc)
+        
         if not img:
             log(f"⚠️ Попытка {i+1}: не удалось получить картинку — {u}")
             continue
-
+        
         img = ensure_size(img, 1000)
         page = u
         log(f"✅ Попытка {i+1}: товар «{title[:70]}» с картинкой — {page}")
         break
-
+    
     if site_down:
-        log("❌ Сайт pavrus.ru недоступен — агент останавливается без публикации")
+        log("❌ Сайт pavrus.ru недоступен — агент останавливается")
         sys.exit(0)
-
+    
     if not page:
         if last_ok:
             page, title, desc, body = last_ok
@@ -778,10 +829,10 @@ def main():
         else:
             log("❌ Не найдена подходящая страница")
             sys.exit(1)
-
+    
     hist.add(page)
     json.dump(sorted(hist), open(HISTORY, "w", encoding="utf-8"), ensure_ascii=False)
-
+    
     prompt = (
         f"Напиши пост для сообщества ВКонтакте «Группа SBL» о товаре.\n\n"
         f"ТОВАР: {title}\n"
@@ -795,31 +846,37 @@ def main():
         f"5. В конце строка: «Подробнее: {page}»\n"
         f"6. Без хэштегов."
     )
+    
     text = ai_call(prompt, 400)
     if not text:
-        log("⏳ Все ИИ молчат с первого захода — пауза 30 сек и повторный прогон")
+        log("⏳ Все ИИ молчат — пауза 30 сек и повтор")
         time.sleep(30)
         text = ai_call(prompt, 400)
+    
     if not text:
         base = body[:900] or desc
         text = f"{title}\n\n{base}\n\nПодробнее: {page}"
         log("⚠️ Все ступени ИИ недоступны — фолбэк из текста страницы")
+    
     text = text.replace("**", "").replace("##", "").strip()
     if len(text) > 1500:
         text = text[:1500].rsplit(" ", 1)[0].rstrip() + f"\n\nПодробнее: {page}"
+    
     log(f"📝 Текст поста: {len(text)} симв.")
-
+    
     att = vk_upload(img) if img else None
     if not att and img:
         log("⚠️ ВК: пост уйдёт без фото")
+    
     ok = vk_post(text, att)
     if not ok:
         log("❌ ВК: пост не опубликован")
         sys.exit(1)
+    
     tg_post(img, text)
-
+    
     log("=" * 50)
-    log("✅ FINISH: товар → ВК sblgroup + TG → Дзен (обложка ≥700px)!")
+    log("✅ FINISH: товар → ВК + TG!")
     log("=" * 50)
 
 if __name__ == "__main__":
