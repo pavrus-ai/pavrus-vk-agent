@@ -1,11 +1,10 @@
 # -*- coding: utf-8 -*-
-import os, re, json, html, random, sys, io, time, datetime, base64, uuid, urllib3
-import requests
+import os, re, json, html, random, sys, io, time, datetime, base64, uuid, requests, urllib3
 from PIL import Image
 urllib3.disable_warnings()
 
 # ============================================================
-# КОНФИГУРАЦИЯ (БЕЗ ПРОБЕЛОВ!)
+# КОНФИГУРАЦИЯ (ВСЕ ПРОБЕЛЫ В СТРОКАХ УДАЛЕНЫ)
 # ============================================================
 VK_TOKEN = os.environ.get("VK_TOKEN", "").strip()
 VK_USER_TOKEN = os.environ.get("VK_USER_TOKEN", "").strip()
@@ -28,7 +27,6 @@ HISTORY = "history_vk.json"
 CACHE = "sitemap_cache.json"
 API = "https://api.vk.com/method/"
 VK_V = "5.131"
-POLLINATIONS_API = "https://image.pollinations.ai/prompt/"
 
 BRAND_SLUGS = ["pavrus", "htdz", "ht-dz", "chartu", "restmoment", "rest-moment"]
 BL = ["корзин", "кабинет", "избранн", "сравнени", "войти", "заказать звонок",
@@ -41,10 +39,10 @@ BL = ["корзин", "кабинет", "избранн", "сравнени", "�
 def log(msg):
     print(msg, flush=True)
 
-log("pavrus-vk-agent v37 (Playwright для обхода Beget, GitHub Actions)")
+log("pavrus-vk-agent v38 (Playwright, Дзен-формат 1500-2500 симв, БЕЗ ссылок)")
 
 # ============================================================
-# PLAYWRIGHT: скачивание страниц через реальный Chrome
+# PLAYWRIGHT: обход JS-защиты Beget
 # ============================================================
 _pw_browser = None
 _pw_context = None
@@ -161,7 +159,8 @@ def parse_text(r):
         seen.add(low)
         keep.append(s)
 
-    return h1, desc, ". ".join(keep)[:1500]
+    # Увеличили до 2500, чтобы ИИ было из чего писать длинный пост
+    return h1, desc, ". ".join(keep)[:2500]
 
 def parse_gallery(r):
     out, seen = [], set()
@@ -215,7 +214,7 @@ def ai_gigachat(prompt):
             token = r.json()["access_token"]
             r2 = requests.post("https://gigachat.devices.sberbank.ru/api/v1/chat/completions",
                 headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
-                json={"model": "GigaChat:latest", "temperature": 0.8, "max_tokens": 2000,
+                json={"model": "GigaChat:latest", "temperature": 0.8, "max_tokens": 3000,
                       "messages": [{"role": "user", "content": prompt + "\n\nПиши ТОЛЬКО на русском."}]},
                 timeout=90, verify=False)
             if r2.status_code == 200:
@@ -224,12 +223,12 @@ def ai_gigachat(prompt):
         pass
     return None
 
-def ai_call(prompt, minlen=400):
+def ai_call(prompt, minlen=1500): # Требую минимум 1500 символов
     res = ai_gigachat(prompt)
     if res and len(res) >= minlen:
         log(f"Успех: gigachat, {len(res)} симв.")
         return res
-    log("ИИ не ответил. Использую фолбэк.")
+    log("ИИ не ответил или ответил слишком коротко. Использую фолбэк.")
     return None
 
 # ============================================================
@@ -368,32 +367,36 @@ def main():
     hist.add(page)
     json.dump(sorted(hist), open(HISTORY, "w", encoding="utf-8"), ensure_ascii=False)
 
-    # 3. Генерация текста БЕЗ ССЫЛОК
+    # 3. Генерация текста ДЛЯ ДЗЕНА (1500-2500 символов, БЕЗ ССЫЛОК)
     prompt = (
-        f"Напиши пост для ВКонтакте о товаре.\n\n"
+        f"Напиши развернутую, экспертную статью-обзор о товаре для публикации в Яндекс.Дзен и ВКонтакте.\n\n"
         f"ТОВАР: {title}\n"
         f"ОПИСАНИЕ: {desc}\n"
-        f"ДЕТАЛИ: {body[:900]}\n\n"
-        f"ТРЕБОВАНИЯ:\n"
+        f"ПОДРОБНЫЕ ХАРАКТЕРИСТИКИ И ДЕТАЛИ СО СТРАНИЦЫ: {body[:2500]}\n\n"
+        f"СТРОГИЕ ТРЕБОВАНИЯ:\n"
         f"1. ТОЛЬКО русский язык.\n"
-        f"2. 500-900 символов, живо и по-деловому.\n"
-        f"3. Начни с названия товара.\n"
-        f"4. Подчеркни применение: конференц-залы, презентации.\n"
-        f"5. В конце призыв: Напишите нам в сообщения группы.\n"
-        f"6. Без хэштегов.\n"
-        f"7. НИКАКИХ ссылок в тексте."
+        f"2. Объем: СТРОГО от 1500 до 2500 символов (с пробелами). Это критически важно для алгоритмов Дзена!\n"
+        f"3. Стиль: экспертный, живой, по-деловому, без капса и кликбейта. Пиши развернуто, в 2-3 абзаца.\n"
+        f"4. Подчеркни применение: конференц-залы, презентации, масштабные мероприятия, системы голосования.\n"
+        f"5. В конце добавь мягкий призыв: «Напишите нам в сообщения группы — расскажем подробнее и подберём решение под ваш проект».\n"
+        f"6. БЕЗ хэштегов.\n"
+        f"7. КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО: добавлять любые ссылки (http, https, www, pavrus.ru) в текст."
     )
 
-    text = ai_call(prompt, 400)
+    text = ai_call(prompt, 1500)
     if not text:
-        text = f"{title}\n\n{body[:900]}\n\nНапишите нам в сообщения группы!"
+        # Фолбэк тоже делаем подлиннее и без ссылок
+        text = f"{title}\n\n{body[:2000]}\n\nНапишите нам в сообщения группы — расскажем подробнее и подберём решение под ваш проект!"
 
+    # Жесткая очистка от любых ссылок, которые ИИ мог случайно добавить
     text = text.replace("**", "").replace("##", "").strip()
     text = re.sub(r"https?://\S+", "", text)
     text = re.sub(r"pavrus\.ru\S*", "", text, flags=re.I)
+    text = re.sub(r"Подробнее:\s*", "", text, flags=re.I)
 
-    if len(text) > 1500:
-        text = text[:1500].rsplit(" ", 1)[0].rstrip() + "\n\nНапишите нам в сообщения группы!"
+    # Обрезаем только если ИИ выдал действительно огромный текст (>2800)
+    if len(text) > 2800:
+        text = text[:2800].rsplit(" ", 1)[0].rstrip() + "\n\nНапишите нам в сообщения группы — расскажем подробнее!"
 
     log(f"Текст поста: {len(text)} симв.")
 
@@ -406,6 +409,7 @@ def main():
         log("ВК: пост не опубликован")
         sys.exit(1)
 
+# ИСПРАВЛЕНО: правильная проверка __main__
 if __name__ == "__main__":
     try:
         main()
