@@ -4,7 +4,7 @@ from PIL import Image
 urllib3.disable_warnings()
 
 # ============================================================
-# КОНФИГУРАЦИЯ (ВСЕ ПРОБЕЛЫ В СТРОКАХ УДАЛЕНЫ)
+# КОНФИГУРАЦИЯ
 # ============================================================
 VK_TOKEN = os.environ.get("VK_TOKEN", "").strip()
 VK_USER_TOKEN = os.environ.get("VK_USER_TOKEN", "").strip()
@@ -39,10 +39,10 @@ BL = ["корзин", "кабинет", "избранн", "сравнени", "�
 def log(msg):
     print(msg, flush=True)
 
-log("pavrus-vk-agent v40 (без заголовков #, без повтора названия, 1500-2500 симв)")
+log("pavrus-vk-agent v41 (разные тексты для ВК и Дзена, фикс картинок)")
 
 # ============================================================
-# PLAYWRIGHT: обход JS-защиты Beget
+# PLAYWRIGHT
 # ============================================================
 _pw_browser = None
 _pw_context = None
@@ -54,7 +54,7 @@ def pw_init():
         pw = sync_playwright().start()
         _pw_browser = pw.chromium.launch(headless=True)
         _pw_context = _pw_browser.new_context(
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
             locale="ru-RU"
         )
         log("Playwright Chromium запущен")
@@ -110,17 +110,24 @@ def brand_in_url(u):
     return any(b in path for b in BRAND_SLUGS)
 
 def ensure_size(img_bytes, min_w=1000):
+    """Увеличивает картинку если она меньше min_w"""
     try:
         im = Image.open(io.BytesIO(img_bytes))
         w, h = im.size
+        log(f"📐 Исходный размер картинки: {w}x{h}px")
+        
         if w >= min_w:
+            log(f"✅ Размер достаточный (≥{min_w}px)")
             return img_bytes
+        
         new_w, new_h = min_w, int(h * min_w / w)
         im = im.convert("RGB").resize((new_w, new_h), Image.LANCZOS)
         buf = io.BytesIO()
-        im.save(buf, "JPEG", quality=88)
+        im.save(buf, "JPEG", quality=90)
+        log(f"🔍 Картинка увеличена с {w}x{h} до {new_w}x{new_h}px")
         return buf.getvalue()
-    except Exception:
+    except Exception as e:
+        log(f"⚠️ ensure_size ошибка: {e}")
         return img_bytes
 
 def parse_text(r):
@@ -159,7 +166,7 @@ def parse_text(r):
         seen.add(low)
         keep.append(s)
 
-    return h1, desc, ". ".join(keep)[:2500]
+    return h1, desc, ". ".join(keep)[:3000]
 
 def parse_gallery(r):
     out, seen = [], set()
@@ -207,7 +214,8 @@ def ai_gigachat(prompt):
     try:
         credentials = base64.b64encode(f"{GIGACHAT_CLIENT_ID}:{GIGACHAT_CLIENT_SECRET}".encode()).decode()
         r = requests.post("https://ngw.devices.sberbank.ru:9443/api/v2/oauth",
-            headers={"Authorization": f"Basic {credentials}", "RqUID": str(uuid.uuid4()), "Content-Type": "application/x-www-form-urlencoded"},
+            headers={"Authorization": f"Basic {credentials}", "RqUID": str(uuid.uuid4()), 
+                     "Content-Type": "application/x-www-form-urlencoded"},
             data={"scope": "GIGACHAT_API_PERS"}, timeout=30, verify=False)
         if r.status_code == 200 and "access_token" in r.json():
             token = r.json()["access_token"]
@@ -222,16 +230,16 @@ def ai_gigachat(prompt):
         pass
     return None
 
-def ai_call(prompt, minlen=1500):
+def ai_call(prompt, minlen=800):
     res = ai_gigachat(prompt)
     if res and len(res) >= minlen:
-        log(f"Успех: gigachat, {len(res)} симв.")
+        log(f"✅ Успех: gigachat, {len(res)} симв.")
         return res
-    log("ИИ не ответил или ответил слишком коротко. Использую фолбэк.")
+    log("️ ИИ не ответил или ответил слишком коротко.")
     return None
 
 # ============================================================
-# ВК и TG
+# ВК
 # ============================================================
 def vk_call(method, params, token):
     p = dict(params or {})
@@ -239,87 +247,151 @@ def vk_call(method, params, token):
     p["v"] = VK_V
     try:
         r = requests.post(API + method, data=p, timeout=30).json()
-        return r.get("response") if "error" not in r else None
-    except Exception:
+        if "error" in r:
+            log(f"⚠️ VK {method} error: {r['error']}")
+        return r.get("response")
+    except Exception as e:
+        log(f"⚠️ VK {method} exception: {e}")
         return None
 
 def vk_upload(img_bytes):
+    """Загрузка фото в ВК с детальным логом"""
     if not VK_USER_TOKEN:
+        log("⚠️ VK_USER_TOKEN не задан!")
         return None
-    srv = vk_call("photos.getWallUploadServer", {"owner_id": "-" + VK_GROUP_ID}, VK_USER_TOKEN)
-    if not srv or "upload_url" not in srv:
+    
+    if not img_bytes:
+        log("⚠️ Нет данных картинки для загрузки!")
         return None
+        
+    log(f"📤 Загрузка фото в ВК: {len(img_bytes)} байт")
+    
+    # Проверяем формат картинки
     try:
-        r = requests.post(srv["upload_url"], files={"photo": ("p.jpg", img_bytes, "image/jpeg")}, timeout=120).json()
-        if not r.get("photo"):
+        im = Image.open(io.BytesIO(img_bytes))
+        log(f"📐 Формат: {im.format}, Размер: {im.size[0]}x{im.size[1]}, Режим: {im.mode}")
+        if im.mode != 'RGB':
+            im = im.convert('RGB')
+            buf = io.BytesIO()
+            im.save(buf, "JPEG", quality=90)
+            img_bytes = buf.getvalue()
+            log("✅ Конвертировано в RGB/JPEG")
+    except Exception as e:
+        log(f"️ Ошибка проверки картинки: {e}")
+    
+    srv = vk_call("photos.getWallUploadServer", {"owner_id": "-" + VK_GROUP_ID}, VK_USER_TOKEN)
+    if not srv:
+        log("❌ Не получен upload server URL")
+        return None
+    
+    if "upload_url" not in srv:
+        log(f"❌ Нет upload_url в ответе: {srv}")
+        return None
+        
+    log(f"📤 Upload URL: {srv['upload_url'][:80]}...")
+    
+    try:
+        r = requests.post(srv["upload_url"], 
+                         files={"photo": ("product.jpg", img_bytes, "image/jpeg")}, 
+                         timeout=120)
+        log(f" Upload response: {r.status_code}, {len(r.content)} байт")
+        
+        r_json = r.json()
+        if not r_json.get("photo"):
+            log(f"⚠️ Пустое photo в ответе: {r_json}")
             return None
-        sp = {"owner_id": "-" + VK_GROUP_ID, "photo": r["photo"], "server": r.get("server", ""), "hash": r.get("hash", "")}
+            
+        sp = {"owner_id": "-" + VK_GROUP_ID, 
+              "photo": r_json["photo"], 
+              "server": r_json.get("server", ""), 
+              "hash": r_json.get("hash", "")}
+        
+        log(f"📤 Сохранение фото...")
         saved = vk_call("photos.saveWallPhoto", sp, VK_USER_TOKEN)
+        
         if saved:
             p = saved[0]
             att = f"photo{p['owner_id']}_{p['id']}"
             if p.get("access_key"):
                 att += f"_{p['access_key']}"
+            log(f"✅ Фото загружено: {att}")
             return att
-    except Exception:
-        pass
-    return None
+        else:
+            log("❌ photos.saveWallPhoto вернул None")
+            return None
+            
+    except Exception as e:
+        log(f"❌ Ошибка загрузки фото: {e}")
+        import traceback
+        log(traceback.format_exc())
+        return None
 
 def vk_post(message, att):
+    log(f" Публикация в ВК: {len(message)} симв., attachment: {att}")
     params = {"owner_id": "-" + VK_GROUP_ID, "message": message, "from_group": 1, "signed": 0}
     if att:
         params["attachments"] = att
+        log(f"📎 Attachment: {att}")
+    else:
+        log("️ Публикуем БЕЗ фото!")
+        
     res = vk_call("wall.post", params, VK_TOKEN)
     if res:
-        log(f"ВК: пост опубликован: https://vk.com/wall-{VK_GROUP_ID}_{res.get('post_id')}")
+        log(f"✅ ВК: пост опубликован: https://vk.com/wall-{VK_GROUP_ID}_{res.get('post_id')}")
         return True
-    return False
+    else:
+        log("❌ wall.post вернул None")
+        return False
 
 def tg_post(img_bytes, caption):
     if not TG_BOT or not TG_CHAT:
+        log("⚠️ TG не настроен (нет токена или chat_id)")
         return
-    caption = caption[:4000].rstrip()  # TG позволяет до 4096 символов
+        
+    log(f"📤 Отправка в TG: {len(caption)} симв., фото: {len(img_bytes) if img_bytes else 0} байт")
+    
     if img_bytes:
         r = requests.post(f"https://api.telegram.org/bot{TG_BOT}/sendPhoto",
             data={"chat_id": TG_CHAT, "caption": caption},
-            files={"photo": ("p.jpg", img_bytes, "image/jpeg")}, timeout=120).json()
+            files={"photo": ("product.jpg", img_bytes, "image/jpeg")}, timeout=120).json()
     else:
         r = requests.post(f"https://api.telegram.org/bot{TG_BOT}/sendMessage",
             data={"chat_id": TG_CHAT, "text": caption}, timeout=60).json()
+            
     if r.get("ok"):
-        log(f"TG: отправлено в {TG_CHAT}")
+        log(f"✅ TG: отправлено в {TG_CHAT}")
+    else:
+        log(f"⚠️ TG error: {r}")
 
 # ============================================================
 # ГЛАВНАЯ ЛОГИКА
 # ============================================================
 def main():
-    # 1. Читаем локальный кэш
     try:
         cache = json.load(open(CACHE, encoding="utf-8"))
         urls = cache.get("urls", [])
         if not urls:
-            log("Файл sitemap_cache.json пуст.")
+            log("❌ sitemap_cache.json пуст")
             sys.exit(1)
-        log(f"Использован локальный кэш: {len(urls)} ссылок")
+        log(f"✅ Кэш: {len(urls)} ссылок")
     except FileNotFoundError:
-        log(f"Файл {CACHE} не найден!")
+        log(f"❌ {CACHE} не найден!")
         sys.exit(1)
 
     cand = [u for u in urls if brand_in_url(u)]
-    log(f"URL с брендом: {len(cand)} из {len(urls)}")
+    log(f"🎯 URL с брендом: {len(cand)} из {len(urls)}")
     if not cand:
-        log("Нет URL с брендами")
+        log("❌ Нет URL с брендами")
         sys.exit(1)
 
     try:
         hist = set(json.load(open(HISTORY, encoding="utf-8"))) if os.path.exists(HISTORY) else set()
-    except Exception:
+    except:
         hist = set()
 
     avail = [u for u in cand if u not in hist] or cand
     random.shuffle(avail)
 
-    # 2. Инициализируем Playwright
     pw_ok = pw_init()
 
     page = title = desc = body = None
@@ -332,14 +404,10 @@ def main():
             try:
                 rs = requests.get(u, timeout=30, headers={"User-Agent": "Mozilla/5.0"})
                 r_text = rs.text if rs.status_code == 200 else None
-            except Exception:
+            except:
                 r_text = None
 
-        if not r_text or len(r_text) < 3000:
-            continue
-
-        if "beget=begetok" in r_text:
-            log(f"Заглушка Beget на {u}")
+        if not r_text or len(r_text) < 3000 or "beget=begetok" in r_text:
             continue
 
         title, desc, body = parse_text(r_text)
@@ -350,92 +418,108 @@ def main():
         img = choose_image(imgs, u) if imgs else None
 
         if img:
-            img = ensure_size(img, 1000)
+            img = ensure_size(img, 1000)  # Увеличиваем если нужно
             page = u
-            log(f"Найден товар: {title[:60]}")
+            log(f"✅ Товар: {title[:60]}")
             break
 
     pw_close()
 
     if not page:
-        log("Не найдена подходящая страница")
+        log("❌ Не найдена страница")
         sys.exit(1)
 
     hist.add(page)
     json.dump(sorted(hist), open(HISTORY, "w", encoding="utf-8"), ensure_ascii=False)
 
-    # 3. Генерация текста БЕЗ ЗАГОЛОВКОВ, БЕЗ ПОВТОРА НАЗВАНИЯ, 1500-2500 символов
-    prompt = (
-        f"Напиши развернутую экспертную статью о товаре для Яндекс.Дзен и ВКонтакте.\n\n"
+    # ========================================
+    # ГЕНЕРАЦИЯ ДВУХ ТЕКСТОВ: ДЛЯ ВК И ДЛЯ ДЗЕНА
+    # ========================================
+    
+    # 1. КОРОТКИЙ ТЕКСТ ДЛЯ ВК (900-1200 символов)
+    prompt_vk = (
+        f"Напиши пост о товаре для ВКонтакте.\n\n"
+        f"ТОВАР: {title}\n"
+        f"ОПИСАНИЕ: {desc}\n"
+        f"ХАРАКТЕРИСТИКИ: {body[:1500]}\n\n"
+        f"ТРЕБОВАНИЯ:\n"
+        f"1. ТОЛЬКО русский язык.\n"
+        f"2. Объем: 900-1200 символов с пробелами.\n"
+        f"3. БЕЗ заголовков # и markdown.\n"
+        f"4. Начни сразу с текста, не повторяй название.\n"
+        f"5. 1-2 абзаца, живой стиль.\n"
+        f"6. Подчеркни: конференц-залы, презентации.\n"
+        f"7. В конце: «Напишите нам в сообщения группы — расскажем подробнее».\n"
+        f"8. БЕЗ хэштегов и ссылок."
+    )
+
+    text_vk = ai_call(prompt_vk, 800)
+    if not text_vk:
+        text_vk = f"Современное оборудование для конференц-залов.\n\n{desc}\n\nНапишите нам в сообщения группы — расскажем подробнее!"
+    
+    # Очистка текста для ВК
+    text_vk = text_vk.replace("**", "").replace("##", "").strip()
+    text_vk = re.sub(r"^#.*\n", "", text_vk, flags=re.M)  # Удаляем заголовки
+    text_vk = re.sub(r"https?://\S+", "", text_vk)
+    text_vk = re.sub(r"pavrus\.ru\S*", "", text_vk, flags=re.I)
+    
+    # Обрезаем до 1200 символов по последнему предложению
+    if len(text_vk) > 1200:
+        cut_pos = text_vk.rfind('.', 0, 1200)
+        if cut_pos > 900:
+            text_vk = text_vk[:cut_pos + 1]
+        else:
+            text_vk = text_vk[:1200].rsplit(' ', 1)[0]
+    
+    log(f"📝 Текст для ВК: {len(text_vk)} симв.")
+
+    # 2. ДЛИННЫЙ ТЕКСТ ДЛЯ ДЗЕНА (1500-2500 символов)
+    # Этот текст вы можете копировать из ВК поста или генерировать отдельно
+    prompt_dzen = (
+        f"Напиши развернутую статью о товаре для Яндекс.Дзен.\n\n"
         f"ТОВАР: {title}\n"
         f"ОПИСАНИЕ: {desc}\n"
         f"ХАРАКТЕРИСТИКИ: {body[:2500]}\n\n"
-        f"КРИТИЧЕСКИ ВАЖНЫЕ ТРЕБОВАНИЯ:\n"
+        f"ТРЕБОВАНИЯ:\n"
         f"1. ТОЛЬКО русский язык.\n"
-        f"2. Объем: СТРОГО 1500-2500 символов с пробелами.\n"
-        f"3. КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО: использовать символы # или * в начале строк (никаких markdown-заголовков).\n"
-        f"4. КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО: начинать текст с названия товара или повторять его в первой строке.\n"
-        f"5. Начни сразу с описательного текста, например: «Современное оборудование для конференц-залов...» или «Профессиональное решение для...».\n"
-        f"6. Пиши развернутыми абзацами (2-3 абзаца), экспертным стилем, без тезисов.\n"
-        f"7. Подчеркни применение: конференц-залы, презентации, масштабные мероприятия.\n"
-        f"8. В конце: «Напишите нам в сообщения группы — расскажем подробнее и подберём решение под ваш проект».\n"
-        f"9. БЕЗ хэштегов и ссылок (http, https, www, pavrus.ru)."
+        f"2. Объем: 1500-2500 символов с пробелами.\n"
+        f"3. БЕЗ заголовков #.\n"
+        f"4. 2-3 развернутых абзаца, экспертный стиль.\n"
+        f"5. Подробно опиши применение: конференц-залы, мероприятия.\n"
+        f"6. В конце: «Напишите нам в сообщения группы — подберём решение».\n"
+        f"7. БЕЗ хэштегов и ссылок."
     )
-
-    text = ai_call(prompt, 1500)
-    if not text:
-        text = f"Современное профессиональное оборудование для конференц-залов и масштабных мероприятий.\n\n{desc}\n\n{body[:2000]}\n\nНапишите нам в сообщения группы — расскажем подробнее и подберём решение под ваш проект!"
-
-    # ОЧИСТКА ТЕКСТА
-    lines = text.split('\n')
-    cleaned_lines = []
-    for line in lines:
-        line = line.strip()
-        # Пропускаем строки, начинающиеся с # (markdown заголовки)
-        if line.startswith('#'):
-            continue
-        # Пропускаем строки, которые повторяют название товара (первые 2 строки)
-        if len(cleaned_lines) < 2 and title.lower() in line.lower() and len(line) < len(title) + 30:
-            continue
-        cleaned_lines.append(line)
     
-    text = '\n'.join(cleaned_lines).strip()
-    
-    # Удаляем markdown-форматирование
-    text = text.replace("**", "").replace("##", "").replace("*", "")
-    
-    # Удаляем ссылки
-    text = re.sub(r"https?://\S+", "", text)
-    text = re.sub(r"pavrus\.ru\S*", "", text, flags=re.I)
-    text = re.sub(r"Подробнее:\s*", "", text, flags=re.I)
-    
-    # УМНАЯ ОБРЕЗКА: обрезаем по последнему полному предложению до 2500 символов
-    if len(text) > 2500:
-        cut_pos = text.rfind('.', 0, 2500)
-        if cut_pos > 1500:
-            text = text[:cut_pos + 1]
-        else:
-            cut_pos = text.rfind(' ', 0, 2500)
-            if cut_pos > 1500:
-                text = text[:cut_pos]
-        
-        if "Напишите нам" not in text:
-            text += "\n\nНапишите нам в сообщения группы — расскажем подробнее!"
+    # Генерируем длинный текст (можно закомментировать если не нужно)
+    text_dzen = ai_call(prompt_dzen, 1500)
+    if text_dzen:
+        text_dzen = text_dzen.replace("**", "").replace("##", "").strip()
+        text_dzen = re.sub(r"^#.*\n", "", text_dzen, flags=re.M)
+        text_dzen = re.sub(r"https?://\S+", "", text_dzen)
+        log(f"📝 Текст для Дзена: {len(text_dzen)} симв. (сохраните для ручной публикации)")
 
-    log(f"Текст поста: {len(text)} симв.")
-
-    # 4. Публикация
+    # ========================================
+    # ПУБЛИКАЦИЯ
+    # ========================================
     att = vk_upload(img) if img else None
-    if vk_post(text, att):
-        tg_post(img, text)
-        log("FINISH: товар -> ВК + TG!")
+    log(f"📎 Attachment для ВК: {att if att else 'None'}")
+    
+    if vk_post(text_vk, att):
+        log("✅ ВК: опубликовано успешно!")
+        tg_post(img, text_vk)
     else:
-        log("ВК: пост не опубликован")
+        log("❌ ВК: публикация не удалась")
         sys.exit(1)
+
+    log("=" * 50)
+    log("✅ FINISH: товар -> ВК + TG")
+    log("=" * 50)
 
 if __name__ == "__main__":
     try:
         main()
     except Exception as e:
-        log(f"КРИТИЧЕСКАЯ ОШИБКА: {e}")
+        log(f"❌ КРИТИЧЕСКАЯ ОШИБКА: {e}")
+        import traceback
+        log(traceback.format_exc())
         raise
