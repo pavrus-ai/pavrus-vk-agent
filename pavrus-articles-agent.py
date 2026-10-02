@@ -48,6 +48,32 @@ JUNK_PATTERNS = [
     r"корзин|кабинет|избранн|сравнени",
 ]
 
+# 🛡️ АНТИ-НЕЙРОСЛОП: список запрещенных ИИ-клише и их замен
+ANTI_SLOP_REPLACEMENTS = {
+    "представляет собой": "",
+    "является": "",
+    "стоит отметить": "",
+    "важно понимать": "",
+    "безусловно": "",
+    "в современном мире": "",
+    "играет ключевую роль": "",
+    "инновационный": "современный",
+    "революционный": "новый",
+    "подводя итог": "",
+    "в заключение": "",
+    "таким образом": "",
+    "не стоит забывать": "",
+    "следует отметить": ""
+}
+
+def clean_slop(text):
+    """Вычищает ИИ-клише из текста"""
+    for slop, replacement in ANTI_SLOP_REPLACEMENTS.items():
+        text = re.sub(r"\b" + slop + r"\b", replacement, text, flags=re.IGNORECASE)
+    text = re.sub(r"\s+", " ", text)
+    text = re.sub(r"\s+([.,;:!?])", r"\1", text)
+    return text.strip()
+
 HEADING_SEEDS = {
     "what_is": ["Что представляет собой устройство", "Принцип работы устройства",
                 "Техническая справка", "Общее описание", "Анатомия решения",
@@ -78,7 +104,7 @@ def select_seeds():
 def log(msg):
     print(msg, flush=True)
 
-log("pavrus-articles-agent v16 (Playwright, локальный кэш, строгая очистка заголовков)")
+log("pavrus-articles-agent v17 (Playwright, локальный кэш, строгая очистка, АНТИ-НЕЙРОСЛОП)")
 
 # ============================================================
 # PLAYWRIGHT: обход JS-защиты Beget
@@ -406,6 +432,7 @@ def generate_article(title, desc, body, url, hd):
         f"6. Стиль: эксперт по AV-оборудованию, живо и конкретно, без воды.\n"
         f"7. Не выдумывай характеристики, которых нет в исходных данных.\n"
         f"8. В последнем абзаце: «По всем вопросам обращайтесь к специалистам компании PAVRUS».\n"
+        f"9. 🛡️ АНТИ-НЕЙРОСЛОП: ЗАПРЕЩЕНО использовать слова: 'инновационный', 'революционный', 'в современном мире', 'стоит отметить', 'важно понимать', 'безусловно', 'играет ключевую роль', 'представляет собой', 'является'. Пиши как живой эксперт-практик, используй активный залог и конкретные факты."
     )
     article = ai_gigachat(prompt, minlen=1500)
     if not article:
@@ -420,6 +447,9 @@ def generate_article(title, desc, body, url, hd):
         article = ai_gigachat(prompt2, minlen=1200)
     if not article:
         return None
+    
+    # 🛡️ ПРИНУДИТЕЛЬНАЯ ОЧИСТКА ОТ НЕЙРОСЛОПА
+    article = clean_slop(article)
     article = sanitize_ai_html(article)
     article = trim_article(article, 2600)
     return article
@@ -435,9 +465,11 @@ def generate_news_from_article(article, title, hd):
         f"4. Формат: чистый HTML, БЕЗ markdown, БЕЗ ##, БЕЗ эмодзи, БЕЗ id-атрибутов.\n"
         f"5. Содержание: что за товар, главное применение, ключевая особенность.\n"
         f"6. В конце: «Подробнее — у специалистов PAVRUS».\n"
+        f"7. 🛡️ АНТИ-НЕЙРОСЛОП: ЗАПРЕЩЕНО использовать слова: 'инновационный', 'революционный', 'в современном мире', 'стоит отметить', 'важно понимать', 'безусловно', 'играет ключевую роль', 'представляет собой', 'является'."
     )
     news = ai_gigachat(prompt, minlen=400)
     if news:
+        news = clean_slop(news)
         news = sanitize_ai_html(news)
         if len(news) > 800:
             news = news[:800].rsplit("</p>", 1)[0] + "</p>"
@@ -538,7 +570,6 @@ def send_email(subject, body_text, attachment_path):
 # ГЛАВНАЯ ЛОГИКА
 # ============================================================
 def main():
-    # 1. Читаем локальный кэш
     try:
         cache = json.load(open(CACHE, encoding="utf-8"))
         urls = cache.get("urls", [])
@@ -561,20 +592,17 @@ def main():
     except Exception:
         hist = set()
 
-    # 2. Инициализируем Playwright
     pw_ok = pw_init()
     if not pw_ok:
         log("Playwright не запустился — выход")
         sys.exit(1)
 
-    # 3. Выбираем страницу
     page, title, desc, body = pick_page(pavrus_urls, hist)
     if not page:
         log("Не найдена подходящая страница PAVRUS")
         pw_close()
         sys.exit(1)
 
-    # 4. Генерация заголовков и статьи
     log("Этап 3: заголовки + подзаголовки + статья (1800-2500 симв.)...")
     seeds = select_seeds()
     hd = generate_headings_and_titles(title, desc, seeds)
@@ -604,7 +632,6 @@ def main():
     log(f"НОВОСТЬ: {len(news)} симв.")
     log("=" * 60)
 
-    # 5. Создаём DOCX
     slug = re.sub(r"[^a-z0-9]+", "-", title.lower())[:50]
     date_str = datetime.date.today().strftime("%Y-%m-%d")
     docx_path = create_docx(title, hd["article_title"], hd["news_title"],
@@ -614,7 +641,6 @@ def main():
         pw_close()
         sys.exit(1)
 
-    # 6. Отправка на почту
     subject = f"PAVRUS: {title} — статья и новость {date_str}"
     body = (f"Добрый день!\n\n"
             f"Сгенерирована статья о товаре PAVRUS.\n\n"
