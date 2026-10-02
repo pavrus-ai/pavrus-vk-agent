@@ -36,10 +36,38 @@ BL = ["корзин", "кабинет", "избранн", "сравнени", "�
       "цена:", "руб", "₽", "купить", "оформить заказ", "в наличии", "под заказ",
       "артикул", "арт.", "гаранти", "доставк", "cookie", "политик"]
 
+# 🛡️ АНТИ-НЕЙРОСЛОП: список запрещенных ИИ-клише и их замен
+ANTI_SLOP_REPLACEMENTS = {
+    "представляет собой": "",
+    "является": "",
+    "стоит отметить": "",
+    "важно понимать": "",
+    "безусловно": "",
+    "в современном мире": "",
+    "играет ключевую роль": "",
+    "инновационный": "современный",
+    "революционный": "новый",
+    "подводя итог": "",
+    "в заключение": "",
+    "таким образом": "",
+    "не стоит забывать": "",
+    "следует отметить": ""
+}
+
+def clean_slop(text):
+    """Вычищает ИИ-клише из текста"""
+    for slop, replacement in ANTI_SLOP_REPLACEMENTS.items():
+        text = re.sub(r"\b" + slop + r"\b", replacement, text, flags=re.IGNORECASE)
+    # Убираем двойные пробелы, возникшие после удаления слов
+    text = re.sub(r"\s+", " ", text)
+    # Убираем пробелы перед знаками препинания
+    text = re.sub(r"\s+([.,;:!?])", r"\1", text)
+    return text.strip()
+
 def log(msg):
     print(msg, flush=True)
 
-log("pavrus-vk-agent v50 (Playwright, локальный кэш, ОДИН пост, без повтора заголовка)")
+log("pavrus-vk-agent v51 (Playwright, локальный кэш, ОДИН пост, АНТИ-НЕЙРОСЛОП)")
 
 # ============================================================
 # PLAYWRIGHT: обход JS-защиты Beget
@@ -341,7 +369,6 @@ def tg_post(img_bytes, caption):
 
     log(f"Отправка в TG: {len(caption)} симв., фото: {len(img_bytes) if img_bytes else 0} байт")
 
-    # Обрезаем по последнему полному предложению до 1000 символов
     max_len = 1000
     if len(caption) > max_len:
         cut_pos = caption.rfind('.', 0, max_len)
@@ -353,7 +380,6 @@ def tg_post(img_bytes, caption):
                 caption = caption[:cut_pos]
         log(f"Текст обрезан до {len(caption)} симв. (лимит TG 1024)")
 
-    # ОДНО сообщение — никаких разбивок!
     if img_bytes:
         r = requests.post(f"https://api.telegram.org/bot{TG_BOT}/sendPhoto",
             data={"chat_id": TG_CHAT, "caption": caption},
@@ -371,7 +397,6 @@ def tg_post(img_bytes, caption):
 # ГЛАВНАЯ ЛОГИКА
 # ============================================================
 def main():
-    # 1. Читаем локальный кэш
     try:
         cache = json.load(open(CACHE, encoding="utf-8"))
         urls = cache.get("urls", [])
@@ -397,7 +422,6 @@ def main():
     avail = [u for u in cand if u not in hist] or cand
     random.shuffle(avail)
 
-    # 2. Инициализируем Playwright
     pw_ok = pw_init()
 
     page = title = desc = body = None
@@ -442,7 +466,7 @@ def main():
     hist.add(page)
     json.dump(sorted(hist), open(HISTORY, "w", encoding="utf-8"), ensure_ascii=False)
 
-    # 3. ОДИН текст для ВК + ТГ + Дзен (900-1000 символов)
+    # 🛡️ ПРОМПТ С АНТИ-НЕЙРОСЛОПОМ
     prompt = (
         f"Напиши пост о товаре для ВКонтакте, Telegram и Дзена.\n\n"
         f"ТОВАР: {title}\n"
@@ -456,14 +480,18 @@ def main():
         f"5. 1-2 абзаца, живой экспертный стиль.\n"
         f"6. Подчеркни применение: конференц-залы, презентации, мероприятия.\n"
         f"7. В конце: «Напишите нам в сообщения группы — расскажем подробнее».\n"
-        f"8. БЕЗ хэштегов и ссылок (http, https, www, pavrus.ru)."
+        f"8. БЕЗ хэштегов и ссылок (http, https, www, pavrus.ru).\n"
+        f"9. 🛡️ АНТИ-НЕЙРОСЛОП: ЗАПРЕЩЕНО использовать слова: 'инновационный', 'революционный', 'в современном мире', 'стоит отметить', 'важно понимать', 'безусловно', 'играет ключевую роль', 'представляет собой', 'является'. Пиши как живой эксперт-практик, используй активный залог и конкретные факты."
     )
 
     text = ai_call(prompt, 700)
     if not text:
         text = f"Современное оборудование для конференц-залов и масштабных мероприятий.\n\n{desc}\n\nНапишите нам в сообщения группы — расскажем подробнее!"
 
-    # Очистка
+    # 🛡️ ПРИНУДИТЕЛЬНАЯ ОЧИСТКА ОТ НЕЙРОСЛОПА
+    text = clean_slop(text)
+    
+    # Очистка от markdown и ссылок
     text = text.replace("**", "").replace("##", "").strip()
     text = re.sub(r"^#.*\n", "", text, flags=re.M)
     text = re.sub(r"https?://\S+", "", text)
@@ -499,7 +527,7 @@ def main():
 
     log(f"Текст поста: {len(text)} симв.")
 
-    # 4. Публикация
+    # Публикация
     att = vk_upload(img) if img else None
     log(f"Attachment для ВК: {att if att else 'None'}")
 
