@@ -1,11 +1,11 @@
 # -*- coding: utf-8 -*-
 """
-pavrus-articles-agent v33
-Берёт материал со сайта pavrus.ru (sitemap → кэш любого возраста),
-пишет статью 2000-2500 символов с анти-слопом и отправляет её по почте.
-История отправок и кэш карты сайта — JSON-файлы в репозитории.
+pavrus-articles-agent v34
+Обход блокировки сайта: curl-cffi → playwright → requests.
+Фильтр только карточек товаров (/catalog/).
+Проверка длины ответа: если < 500 байт — заглушка.
 """
-import os, json, datetime, time, re, html, smtplib, urllib3, requests
+import os, json, datetime, time, re, html, smtplib, urllib3
 from urllib.parse import urljoin
 from email.message import EmailMessage
 urllib3.disable_warnings()
@@ -49,36 +49,106 @@ ANTI_SLOP = ("Пиши неровно и конкретно: разная дли
 def log(msg):
     print(msg, flush=True)
 
-log("Версия ℹ️ pavrus-articles-agent v33 (кэш карты любого возраста; browser UA + retry; история в JSON; статьи 2000-2500; анти-слоп; ссылка только в подвале письма)")
+log("Версия ℹ️ pavrus-articles-agent v34 (обход блокировки curl-cffi/playwright; фильтр /catalog/; проверка длины ответа; fallback на следующую страницу)")
 
 # ============================================================
-# СЕТЬ И КАРТА САЙТА
+# СЕТЬ И КАРТА САЙТА (с обходом блокировки)
 # ============================================================
+
+def http_get_curl_cffi(url, timeout=30):
+    """Попытка 1: curl-cffi (TLS fingerprinting, имитация Chrome)."""
+    try:
+        from curl_cffi import requests as cffi_requests
+        r = cffi_requests.get(url, timeout=timeout, impersonate="chrome",
+                              headers={"Accept-Language": "ru,en;q=0.8"})
+        log(f"✅ curl-cffi: {url} → статус {r.status_code}, {len(r.content)} байт")
+        return r
+    except ImportError:
+        log("ℹ️ curl-cffi не установлен")
+        return None
+    except Exception as e:
+        log(f"⚠️ curl-cffi ошибка: {str(e)[:80]}")
+        return None
+
+def http_get_playwright(url, timeout=30):
+    """Попытка 2: playwright (headless Chrome, полный JS)."""
+    try:
+        from playwright.sync_api import sync_playwright
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            page = browser.new_page()
+            page.goto(url, timeout=timeout * 1000)
+            content = page.content()
+            browser.close()
+            log(f"✅ playwright: {url} → {len(content)} байт")
+            class FakeResponse:
+                def __init__(self, text, status):
+                    self.text = text
+                    self.content = text.encode()
+                    self.status_code = status
+                    self.ok = status == 200
+            return FakeResponse(content, 200)
+    except ImportError:
+        log("ℹ️ playwright не установлен")
+        return None
+    except Exception as e:
+        log(f"⚠️ playwright ошибка: {str(e)[:80]}")
+        return None
+
+def http_get_requests(url, timeout=30):
+    """Попытка 3: обычный requests."""
+    try:
+        import requests
+        r = requests.get(url, timeout=timeout,
+                         headers={"User-Agent": BROWSER_UA,
+                                  "Accept-Language": "ru,en;q=0.8"})
+        log(f"ℹ️ requests: {url} → статус {r.status_code}, {len(r.content)} байт")
+        return r
+    except Exception as e:
+        log(f"⚠️ requests ошибка: {str(e)[:80]}")
+        return None
 
 def http_get(url, timeout=30, tries=3):
+    """v34: curl-cffi → playwright → requests, с проверкой длины ответа."""
     for i in range(tries):
-        try:
-            r = requests.get(url, timeout=timeout,
-                             headers={"User-Agent": BROWSER_UA,
-                                      "Accept-Language": "ru,en;q=0.8"})
-            log(f"ℹ️ GET {url} → статус {r.status_code}, {len(r.content)} байт")
+        # Попытка 1: curl-cffi
+        r = http_get_curl_cffi(url, timeout)
+        if r and r.ok and len(r.content) > 500:
             return r
-        except Exception as e:
-            log(f"⚠️ GET {url} попытка {i+1}: {str(e)[:80]}")
-            time.sleep(5 * (i + 1))
+        
+        # Попытка 2: playwright
+        r = http_get_playwright(url, timeout)
+        if r and r.ok and len(r.content) > 500:
+            return r
+        
+        # Попытка 3: requests
+        r = http_get_requests(url, timeout)
+        if r and r.ok and len(r.content) > 500:
+            return r
+        
+        log(f"⚠️ Попытка {i+1}/{tries}: заглушка или ошибка, жду 5 сек...")
+        time.sleep(5)
+    
     return None
 
 def fetch_sitemap():
-    for sm in ("/sitemap.xml", "/sitemap-index.xml", "/sitemap_index.xml", "/wp-sitemap.xml"):
-        r = http_get(SITE + sm)
-        if r is not None and r.ok and ("<urlset" in r.text or "<sitemapindex" in r.text):
-            urls = re.findall(r"<loc>\s*([^<\s]+)\s*</loc>", r.text)
-            if urls:
-                return sorted(set(urls))
+    """v34: берём карту сайта каталога (sitemap-iblock-91.xml)."""
+    sitemap_url = f"{SITE}/sitemap-iblock-91.xml"
+    r = http_get(sitemap_url)
+    if r and r.ok and ("<urlset" in r.text or "<sitemapindex" in r.text):
+        urls = re.findall(r"<loc>\s*([^<\s]+)\s*</loc>", r.text)
+        # v34: фильтр только карточки товаров (/catalog/)
+        urls = [u for u in urls if "/catalog/" in u]
+        if urls:
+            return sorted(set(urls))
+    
+    # Fallback: парсим главную страницу
     r = http_get(SITE + "/")
-    if r is not None and r.ok:
+    if r and r.ok:
         urls = [urljoin(SITE, u) for u in re.findall(r'href="([^"]+)"', r.text)]
-        return sorted({u for u in urls if u.startswith(SITE)})
+        urls = [u for u in urls if u.startswith(SITE) and "/catalog/" in u]
+        return sorted(set(urls))
+    
     return []
 
 def save_sitemap_cache(urls):
@@ -92,7 +162,7 @@ def save_sitemap_cache(urls):
         log(f"⚠️ save_sitemap_cache: {e}")
 
 def get_site_map():
-    """v33: сайт → кэш ЛЮБОГО возраста → пропуск. Не пропускаем запуск, если кэш жив."""
+    """v34: сайт → кэш ЛЮБОГО возраста → пропуск."""
     urls = fetch_sitemap()
     if urls:
         save_sitemap_cache(urls)
@@ -110,7 +180,7 @@ def get_site_map():
     return []
 
 # ============================================================
-# ИСТОРИЯ ОТПРАВОК (JSON — не рвётся, как текстовик)
+# ИСТОРИЯ ОТПРАВОК
 # ============================================================
 
 def load_history():
@@ -128,30 +198,39 @@ def save_history(sent):
     except Exception as e:
         log(f"⚠️ save_history: {e}")
 
-SKIP_URL_PARTS = (".mp3", ".jpg", ".jpeg", ".png", ".xml", "/feed", "/wp-",
-                  "/tag/", "/tags/", "/category/", "/cgi-bin", ".ico", ".css", ".js")
-
-def pick_page(urls, sent):
-    fresh = [u for u in urls
-             if u not in sent
-             and not u.rstrip("/").endswith(SITE.rstrip("/").split("//")[-1])
-             and not any(p in u.lower() for p in SKIP_URL_PARTS)]
+def pick_pages(urls, sent, count=5):
+    """v34: берём несколько кандидатов для fallback."""
+    fresh = [u for u in urls if u not in sent and "/catalog/" in u]
     if not fresh:
         log("ℹ️ Все подходящие страницы уже отправлены ранее")
-        return None
+        return []
     day = datetime.date.today().toordinal()
-    pick = sorted(fresh)[day % len(fresh)]
-    log(f" Выбрана страница дня: {pick} (новых кандидатов: {len(fresh)})")
-    return pick
+    sorted_urls = sorted(fresh)
+    start = day % len(sorted_urls)
+    candidates = sorted_urls[start:start+count]
+    if len(candidates) < count:
+        candidates += sorted_urls[:count-len(candidates)]
+    log(f"🎯 Кандидаты ({len(candidates)}):")
+    for i, u in enumerate(candidates, 1):
+        log(f"   {i}. {u}")
+    return candidates
 
 def fetch_page_text(url, limit=6000):
+    """v34: с проверкой длины ответа."""
     r = http_get(url)
     if r is None or not r.ok:
+        return ""
+    if len(r.content) < 500:
+        log(f"⚠️ Страница вернула заглушку ({len(r.content)} байт) — пропускаю")
         return ""
     t = re.sub(r"(?is)<(script|style|noscript|svg|head).*?>.*?</\1>", " ", r.text)
     t = re.sub(r"(?s)<[^>]+>", " ", t)
     t = html.unescape(t)
     t = re.sub(r"\s+", " ", t).strip()
+    if len(t) < 200:
+        log(f"⚠️ Текст страницы слишком короткий ({len(t)} симв.) — пропускаю")
+        return ""
+    log(f"📄 Текст страницы: {len(t)} симв.")
     return t[:limit]
 
 # ============================================================
@@ -172,11 +251,12 @@ def get_gigachat_token():
     if _GIGACHAT_TOKEN and time.time() < _GIGACHAT_TOKEN_EXPIRY:
         return _GIGACHAT_TOKEN
     try:
-        credentials = base64.b64encode(f"{GIGACHAT_CLIENT_ID}:{GIGACHAT_CLIENT_SECRET}".encode()).decode() if False else \
-            __import__("base64").b64encode(f"{GIGACHAT_CLIENT_ID}:{GIGACHAT_CLIENT_SECRET}".encode()).decode()
+        import base64, uuid
+        credentials = base64.b64encode(f"{GIGACHAT_CLIENT_ID}:{GIGACHAT_CLIENT_SECRET}".encode()).decode()
+        import requests
         r = requests.post("https://ngw.devices.sberbank.ru:9443/api/v2/oauth",
             headers={"Authorization": f"Basic {credentials}",
-                     "RqUID": str(__import__("uuid").uuid4()),
+                     "RqUID": str(uuid.uuid4()),
                      "Content-Type": "application/x-www-form-urlencoded"},
             data={"scope": "GIGACHAT_API_PERS"}, timeout=30, verify=False)
         log(f"ℹ️ GigaChat OAuth: статус {r.status_code}")
@@ -197,6 +277,7 @@ def ai_gigachat(prompt):
     if not token:
         return None
     try:
+        import requests
         r = requests.post("https://gigachat.devices.sberbank.ru/api/v1/chat/completions",
             headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
             json={"model": "GigaChat:latest", "temperature": 0.9, "max_tokens": 4000,
@@ -213,6 +294,7 @@ def ai_gigachat(prompt):
 def ai_cerebras(prompt):
     if not CEREBRAS_KEY: return None
     try:
+        import requests
         r = requests.post("https://api.cerebras.ai/v1/chat/completions",
             headers={"Authorization": f"Bearer {CEREBRAS_KEY}"},
             json={"model": "llama-3.3-70b", "temperature": 0.8,
@@ -225,6 +307,7 @@ def ai_cerebras(prompt):
 def ai_mistral(prompt):
     if not MISTRAL_KEY: return None
     try:
+        import requests
         r = requests.post("https://api.mistral.ai/v1/chat/completions",
             headers={"Authorization": f"Bearer {MISTRAL_KEY}"},
             json={"model": "mistral-small-latest", "temperature": 0.8,
@@ -237,6 +320,7 @@ def ai_mistral(prompt):
 def ai_groq(prompt, key, model):
     if not key: return None
     try:
+        import requests
         r = requests.post("https://api.groq.com/openai/v1/chat/completions",
             headers={"Authorization": f"Bearer {key}"},
             json={"model": model, "temperature": 0.8,
@@ -249,6 +333,7 @@ def ai_groq(prompt, key, model):
 def ai_openrouter_auto(prompt, key, max_tokens):
     if not key: return None
     try:
+        import requests
         r = requests.post("https://openrouter.ai/api/v1/chat/completions",
             headers={"Authorization": f"Bearer {key}", "HTTP-Referer": "https://github.com"},
             json={"model": "auto", "temperature": 0.8, "max_tokens": max_tokens,
@@ -441,7 +526,7 @@ def send_email(subject, body):
         return False
 
 # ============================================================
-# ГЛАВНАЯ ЛОГИКА
+# ГЛАВНАЯ ЛОГИКА v34
 # ============================================================
 
 def main():
@@ -450,33 +535,38 @@ def main():
         return
 
     sent = load_history()
-    page = pick_page(urls, sent)
-    if not page:
+    candidates = pick_pages(urls, sent, count=5)
+    if not candidates:
         log("ℹ️ Новых страниц нет — письмо сегодня не отправляем")
         return
 
-    page_text = fetch_page_text(page)
-    if not page_text:
-        log("⚠️ Не удалось получить текст страницы — пропускаю запуск")
-        return
-    log(f"📄 Текст страницы: {len(page_text)} симв.")
+    # v34: fallback на несколько страниц
+    for i, page in enumerate(candidates, 1):
+        log(f"\n🔄 Попытка {i}/{len(candidates)}: {page}")
+        page_text = fetch_page_text(page)
+        if not page_text:
+            log(f"⚠️ Страница не парсится, пробую следующую...")
+            continue
+        
+        article = build_article(page, page_text)
+        if not article:
+            continue
 
-    article = build_article(page, page_text)
-    if not article:
-        return
+        headline = article.split("\n")[0].strip()
+        body = (article +
+                f"\n\n---\nПолный материал на сайте: {page}\nПавел Гнесюк — музыка и книги.")
 
-    headline = article.split("\n")[0].strip()
-    # v33: ссылка на сайт — ТОЛЬКО в подвале письма (тело статьи чистое)
-    body = (article +
-            f"\n\n---\nПолный материал на сайте: {page}\nПавел Гнесюк — музыка и книги.")
-
-    ok = send_email(headline, body)
-    if ok:
-        sent[page] = str(datetime.date.today())
-        save_history(sent)
-
+        ok = send_email(headline, body)
+        if ok:
+            sent[page] = str(datetime.date.today())
+            save_history(sent)
+            log("=" * 50)
+            log(f"✅ FINISH: статья {len(article)} симв. → почта: ДА")
+            log("=" * 50)
+            return
+    
     log("=" * 50)
-    log(f"✅ FINISH: статья {len(article)} симв. → почта: {'ДА' if ok else 'НЕТ'}")
+    log("❌ FINISH: все кандидаты не парсятся — письмо не отправлено")
     log("=" * 50)
 
 if __name__ == "__main__":
