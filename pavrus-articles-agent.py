@@ -1,9 +1,8 @@
 # -*- coding: utf-8 -*-
 """
-pavrus-articles-agent v34
-Обход блокировки сайта: curl-cffi → playwright → requests.
-Фильтр только карточек товаров (/catalog/).
-Проверка длины ответа: если < 500 байт — заглушка.
+pavrus-articles-agent v35
+Исправлено: добавлены Groq + OpenRouter + Pollinations в цепочку ИИ.
+Детальное логирование всех ошибок генерации текста.
 """
 import os, json, datetime, time, re, html, smtplib, urllib3
 from urllib.parse import urljoin
@@ -49,14 +48,13 @@ ANTI_SLOP = ("Пиши неровно и конкретно: разная дли
 def log(msg):
     print(msg, flush=True)
 
-log("Версия ℹ️ pavrus-articles-agent v34 (обход блокировки curl-cffi/playwright; фильтр /catalog/; проверка длины ответа; fallback на следующую страницу)")
+log("Версия ℹ️ pavrus-articles-agent v35 (полная цепочка ИИ: GigaChat → Cerebras → Mistral → Groq → OpenRouter → Pollinations; детальное логирование)")
 
 # ============================================================
-# СЕТЬ И КАРТА САЙТА (с обходом блокировки)
+# СЕТЬ И КАРТА САЙТА (curl-cffi → playwright → requests)
 # ============================================================
 
 def http_get_curl_cffi(url, timeout=30):
-    """Попытка 1: curl-cffi (TLS fingerprinting, имитация Chrome)."""
     try:
         from curl_cffi import requests as cffi_requests
         r = cffi_requests.get(url, timeout=timeout, impersonate="chrome",
@@ -64,14 +62,12 @@ def http_get_curl_cffi(url, timeout=30):
         log(f"✅ curl-cffi: {url} → статус {r.status_code}, {len(r.content)} байт")
         return r
     except ImportError:
-        log("ℹ️ curl-cffi не установлен")
         return None
     except Exception as e:
         log(f"⚠️ curl-cffi ошибка: {str(e)[:80]}")
         return None
 
 def http_get_playwright(url, timeout=30):
-    """Попытка 2: playwright (headless Chrome, полный JS)."""
     try:
         from playwright.sync_api import sync_playwright
         with sync_playwright() as p:
@@ -89,14 +85,12 @@ def http_get_playwright(url, timeout=30):
                     self.ok = status == 200
             return FakeResponse(content, 200)
     except ImportError:
-        log("ℹ️ playwright не установлен")
         return None
     except Exception as e:
         log(f"⚠️ playwright ошибка: {str(e)[:80]}")
         return None
 
 def http_get_requests(url, timeout=30):
-    """Попытка 3: обычный requests."""
     try:
         import requests
         r = requests.get(url, timeout=timeout,
@@ -109,46 +103,33 @@ def http_get_requests(url, timeout=30):
         return None
 
 def http_get(url, timeout=30, tries=3):
-    """v34: curl-cffi → playwright → requests, с проверкой длины ответа."""
     for i in range(tries):
-        # Попытка 1: curl-cffi
         r = http_get_curl_cffi(url, timeout)
         if r and r.ok and len(r.content) > 500:
             return r
-        
-        # Попытка 2: playwright
         r = http_get_playwright(url, timeout)
         if r and r.ok and len(r.content) > 500:
             return r
-        
-        # Попытка 3: requests
         r = http_get_requests(url, timeout)
         if r and r.ok and len(r.content) > 500:
             return r
-        
         log(f"⚠️ Попытка {i+1}/{tries}: заглушка или ошибка, жду 5 сек...")
         time.sleep(5)
-    
     return None
 
 def fetch_sitemap():
-    """v34: берём карту сайта каталога (sitemap-iblock-91.xml)."""
     sitemap_url = f"{SITE}/sitemap-iblock-91.xml"
     r = http_get(sitemap_url)
     if r and r.ok and ("<urlset" in r.text or "<sitemapindex" in r.text):
         urls = re.findall(r"<loc>\s*([^<\s]+)\s*</loc>", r.text)
-        # v34: фильтр только карточки товаров (/catalog/)
         urls = [u for u in urls if "/catalog/" in u]
         if urls:
             return sorted(set(urls))
-    
-    # Fallback: парсим главную страницу
     r = http_get(SITE + "/")
     if r and r.ok:
         urls = [urljoin(SITE, u) for u in re.findall(r'href="([^"]+)"', r.text)]
         urls = [u for u in urls if u.startswith(SITE) and "/catalog/" in u]
         return sorted(set(urls))
-    
     return []
 
 def save_sitemap_cache(urls):
@@ -162,7 +143,6 @@ def save_sitemap_cache(urls):
         log(f"⚠️ save_sitemap_cache: {e}")
 
 def get_site_map():
-    """v34: сайт → кэш ЛЮБОГО возраста → пропуск."""
     urls = fetch_sitemap()
     if urls:
         save_sitemap_cache(urls)
@@ -199,7 +179,6 @@ def save_history(sent):
         log(f"⚠️ save_history: {e}")
 
 def pick_pages(urls, sent, count=5):
-    """v34: берём несколько кандидатов для fallback."""
     fresh = [u for u in urls if u not in sent and "/catalog/" in u]
     if not fresh:
         log("ℹ️ Все подходящие страницы уже отправлены ранее")
@@ -216,7 +195,6 @@ def pick_pages(urls, sent, count=5):
     return candidates
 
 def fetch_page_text(url, limit=6000):
-    """v34: с проверкой длины ответа."""
     r = http_get(url)
     if r is None or not r.ok:
         return ""
@@ -234,12 +212,18 @@ def fetch_page_text(url, limit=6000):
     return t[:limit]
 
 # ============================================================
-# ИИ-ЦЕПОЧКА ТЕКСТА
+# ИИ-ЦЕПОЧКА ТЕКСТА (v35: полная цепочка с логированием)
 # ============================================================
 
 def _extract(r):
     try: return r["choices"][0]["message"]["content"].strip()
     except (KeyError, IndexError, TypeError): return None
+
+def _err_snippet(r):
+    e = r.get("error") or {}
+    code = e.get("code") or e.get("type") or "?"
+    msg = str(e.get("message") or e)
+    return f"{code}: {msg[:100]}"
 
 _GIGACHAT_TOKEN = None
 _GIGACHAT_TOKEN_EXPIRY = 0
@@ -251,9 +235,8 @@ def get_gigachat_token():
     if _GIGACHAT_TOKEN and time.time() < _GIGACHAT_TOKEN_EXPIRY:
         return _GIGACHAT_TOKEN
     try:
-        import base64, uuid
+        import base64, uuid, requests
         credentials = base64.b64encode(f"{GIGACHAT_CLIENT_ID}:{GIGACHAT_CLIENT_SECRET}".encode()).decode()
-        import requests
         r = requests.post("https://ngw.devices.sberbank.ru:9443/api/v2/oauth",
             headers={"Authorization": f"Basic {credentials}",
                      "RqUID": str(uuid.uuid4()),
@@ -261,6 +244,7 @@ def get_gigachat_token():
             data={"scope": "GIGACHAT_API_PERS"}, timeout=30, verify=False)
         log(f"ℹ️ GigaChat OAuth: статус {r.status_code}")
         if r.status_code != 200:
+            log(f"⚠️ GigaChat OAuth: {r.text[:200]}")
             return None
         j = r.json()
         if "access_token" in j:
@@ -275,6 +259,7 @@ def get_gigachat_token():
 def ai_gigachat(prompt):
     token = get_gigachat_token()
     if not token:
+        log("   ⚠️ gigachat: токен не получен")
         return None
     try:
         import requests
@@ -284,66 +269,132 @@ def ai_gigachat(prompt):
                   "messages": [{"role": "user", "content": prompt + RU}]},
             timeout=120, verify=False)
         if r.status_code != 200:
-            log(f"⚠️ GigaChat chat: статус {r.status_code}: {r.text[:200]}")
+            log(f"   ⚠️ gigachat: статус {r.status_code}: {r.text[:200]}")
             return None
-        return r.json()["choices"][0]["message"]["content"].strip()
+        j = r.json()
+        if "choices" not in j or not j["choices"]:
+            log(f"   ⚠️ gigachat: пустой ответ: {str(j)[:200]}")
+            return None
+        text = j["choices"][0]["message"]["content"].strip()
+        if not text:
+            log("   ⚠️ gigachat: пустой текст")
+            return None
+        log(f"   ✅ gigachat: {len(text)} симв.")
+        return text
     except Exception as e:
-        log(f"⚠️ GigaChat error: {e}")
+        log(f"   ⚠️ gigachat error: {e}")
         return None
 
 def ai_cerebras(prompt):
-    if not CEREBRAS_KEY: return None
+    if not CEREBRAS_KEY:
+        log("   ⚠️ cerebras: ключ не задан")
+        return None
     try:
         import requests
         r = requests.post("https://api.cerebras.ai/v1/chat/completions",
             headers={"Authorization": f"Bearer {CEREBRAS_KEY}"},
             json={"model": "llama-3.3-70b", "temperature": 0.8,
                   "messages": [{"role": "user", "content": prompt + RU}]}, timeout=60).json()
-        return None if "error" in r else _extract(r)
+        if "error" in r:
+            log(f"   ⚠️ cerebras: {_err_snippet(r)}")
+            return None
+        text = _extract(r)
+        if not text:
+            log("   ⚠️ cerebras: пустой текст")
+            return None
+        log(f"   ✅ cerebras: {len(text)} симв.")
+        return text
     except Exception as e:
-        log(f"   ⚠️ cerebras: {str(e)[:80]}")
+        log(f"   ⚠️ cerebras error: {e}")
         return None
 
 def ai_mistral(prompt):
-    if not MISTRAL_KEY: return None
+    if not MISTRAL_KEY:
+        log("   ⚠️ mistral: ключ не задан")
+        return None
     try:
         import requests
         r = requests.post("https://api.mistral.ai/v1/chat/completions",
             headers={"Authorization": f"Bearer {MISTRAL_KEY}"},
             json={"model": "mistral-small-latest", "temperature": 0.8,
                   "messages": [{"role": "user", "content": prompt + RU}]}, timeout=60).json()
-        return None if "error" in r else _extract(r)
+        if "error" in r:
+            log(f"   ⚠️ mistral: {_err_snippet(r)}")
+            return None
+        text = _extract(r)
+        if not text:
+            log("   ⚠️ mistral: пустой текст")
+            return None
+        log(f"   ✅ mistral: {len(text)} симв.")
+        return text
     except Exception as e:
-        log(f"   ⚠️ mistral: {str(e)[:80]}")
+        log(f"   ⚠️ mistral error: {e}")
         return None
 
 def ai_groq(prompt, key, model):
-    if not key: return None
+    if not key:
+        log(f"   ⚠️ groq {model}: ключ не задан")
+        return None
     try:
         import requests
         r = requests.post("https://api.groq.com/openai/v1/chat/completions",
             headers={"Authorization": f"Bearer {key}"},
             json={"model": model, "temperature": 0.8,
                   "messages": [{"role": "user", "content": prompt + RU}]}, timeout=60).json()
-        return None if "error" in r else _extract(r)
+        if "error" in r:
+            log(f"   ⚠️ groq {model}: {_err_snippet(r)}")
+            return None
+        text = _extract(r)
+        if not text:
+            log(f"   ⚠️ groq {model}: пустой текст")
+            return None
+        log(f"   ✅ groq {model}: {len(text)} симв.")
+        return text
     except Exception as e:
-        log(f"   ⚠️ groq {model}: {str(e)[:80]}")
+        log(f"   ⚠️ groq {model} error: {e}")
         return None
 
 def ai_openrouter_auto(prompt, key, max_tokens):
-    if not key: return None
+    if not key:
+        log(f"   ⚠️ openrouter (max={max_tokens}): ключ не задан")
+        return None
     try:
         import requests
         r = requests.post("https://openrouter.ai/api/v1/chat/completions",
             headers={"Authorization": f"Bearer {key}", "HTTP-Referer": "https://github.com"},
             json={"model": "auto", "temperature": 0.8, "max_tokens": max_tokens,
                   "messages": [{"role": "user", "content": prompt + RU}]}, timeout=60).json()
-        return None if "error" in r else _extract(r)
+        if "error" in r:
+            log(f"   ⚠️ openrouter (max={max_tokens}): {_err_snippet(r)}")
+            return None
+        text = _extract(r)
+        if not text:
+            log(f"   ⚠️ openrouter (max={max_tokens}): пустой текст")
+            return None
+        log(f"   ✅ openrouter (max={max_tokens}): {len(text)} симв.")
+        return text
     except Exception as e:
-        log(f"   ⚠️ openrouter auto: {str(e)[:80]}")
+        log(f"   ⚠️ openrouter error: {e}")
+        return None
+
+def ai_pollinations_text(prompt):
+    try:
+        import requests
+        r = requests.post("https://text.pollinations.ai/openai",
+            json={"model": "openai", "temperature": 0.8,
+                  "messages": [{"role": "user", "content": prompt + RU}]}, timeout=90).json()
+        text = _extract(r)
+        if not text:
+            log("   ⚠️ pollinations-text: пустой текст")
+            return None
+        log(f"   ✅ pollinations-text: {len(text)} симв.")
+        return text
+    except Exception as e:
+        log(f"   ⚠️ pollinations-text error: {e}")
         return None
 
 def ai_text(prompt, minlen=1500, rescue_min=1200):
+    """v35: полная цепочка с детальным логированием."""
     best_res = ""
 
     def take(res, label):
@@ -353,6 +404,7 @@ def ai_text(prompt, minlen=1500, rescue_min=1200):
         if len(res) >= minlen:
             log(f"✅ Успех: {label}, {len(res)} симв.")
             return res
+        log(f"   ⚠️ {label}: текст короче нужного ({len(res)}/{minlen}) — запомнен кандидатом")
         if len(res) > len(best_res):
             best_res = res
         return None
@@ -360,27 +412,38 @@ def ai_text(prompt, minlen=1500, rescue_min=1200):
     log("🔄 Попытка: gigachat (GigaChat:latest)...")
     r = take(ai_gigachat(prompt), "gigachat")
     if r: return r
+    
     log("🔄 Попытка: cerebras (llama-3.3-70b)...")
     r = take(ai_cerebras(prompt), "cerebras")
     if r: return r
+    
     log("🔄 Попытка: mistral (mistral-small)...")
     r = take(ai_mistral(prompt), "mistral")
     if r: return r
+    
     for i, key in enumerate((GROQ_KEY, GROQ_KEY2)):
         if not key: continue
         for model in GROQ_MODELS:
             log(f"🔄 Попытка: groq ({model}, ключ {i+1})...")
             r = take(ai_groq(prompt, key, model), f"groq ({model})")
             if r: return r
+    
     for i, key in enumerate((OR_KEY, OR_KEY2)):
         if not key: continue
         for mt in (4000, 2000):
             log(f"🔄 Попытка: openrouter auto (max={mt}, ключ {i+1})...")
             r = take(ai_openrouter_auto(prompt, key, mt), f"openrouter (max={mt})")
             if r: return r
+    
+    log("🔄 Попытка: pollinations-text (без ключа)...")
+    r = take(ai_pollinations_text(prompt), "pollinations-text")
+    if r: return r
+    
     if best_res and len(best_res) >= rescue_min:
         log(f"ℹ️ Беру лучший кандидат ({len(best_res)} симв.)")
         return best_res
+    
+    log("❌ Все провайдеры не дали текст достаточной длины")
     return None
 
 def extend_text(txt, target):
@@ -526,7 +589,7 @@ def send_email(subject, body):
         return False
 
 # ============================================================
-# ГЛАВНАЯ ЛОГИКА v34
+# ГЛАВНАЯ ЛОГИКА v35
 # ============================================================
 
 def main():
@@ -540,7 +603,6 @@ def main():
         log("ℹ️ Новых страниц нет — письмо сегодня не отправляем")
         return
 
-    # v34: fallback на несколько страниц
     for i, page in enumerate(candidates, 1):
         log(f"\n🔄 Попытка {i}/{len(candidates)}: {page}")
         page_text = fetch_page_text(page)
@@ -566,7 +628,7 @@ def main():
             return
     
     log("=" * 50)
-    log("❌ FINISH: все кандидаты не парсятся — письмо не отправлено")
+    log("❌ FINISH: все кандидаты не парсятся или ИИ не сгенерировал текст")
     log("=" * 50)
 
 if __name__ == "__main__":
