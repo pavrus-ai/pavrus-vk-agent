@@ -15,7 +15,7 @@ except ImportError:
     DOCX_OK = False
 
 # ============================================================
-# КОНФИГУРАЦИЯ (ВСЕ ПРОБЕЛЫ УДАЛЕНЫ)
+# КОНФИГУРАЦИЯ (ВСЕ ПРОБЕЛЫ ВНУТРИ КАВЫЧЕК УДАЛЕНЫ)
 # ============================================================
 GIGACHAT_CLIENT_ID = os.environ.get("GIGACHAT_CLIENT_ID", "").strip()
 GIGACHAT_CLIENT_SECRET = os.environ.get("GIGACHAT_CLIENT_SECRET", "").strip()
@@ -48,26 +48,16 @@ JUNK_PATTERNS = [
     r"корзин|кабинет|избранн|сравнени",
 ]
 
-# 🛡️ АНТИ-НЕЙРОСЛОП: список запрещенных ИИ-клише и их замен
+# 🛡️ АНТИ-НЕЙРОСЛОП
 ANTI_SLOP_REPLACEMENTS = {
-    "представляет собой": "",
-    "является": "",
-    "стоит отметить": "",
-    "важно понимать": "",
-    "безусловно": "",
-    "в современном мире": "",
-    "играет ключевую роль": "",
-    "инновационный": "современный",
-    "революционный": "новый",
-    "подводя итог": "",
-    "в заключение": "",
-    "таким образом": "",
-    "не стоит забывать": "",
-    "следует отметить": ""
+    "представляет собой": "", "является": "", "стоит отметить": "",
+    "важно понимать": "", "безусловно": "", "в современном мире": "",
+    "играет ключевую роль": "", "инновационный": "современный",
+    "революционный": "новый", "подводя итог": "", "в заключение": "",
+    "таким образом": "", "не стоит забывать": "", "следует отметить": ""
 }
 
 def clean_slop(text):
-    """Вычищает ИИ-клише из текста"""
     for slop, replacement in ANTI_SLOP_REPLACEMENTS.items():
         text = re.sub(r"\b" + slop + r"\b", replacement, text, flags=re.IGNORECASE)
     text = re.sub(r"\s+", " ", text)
@@ -75,27 +65,12 @@ def clean_slop(text):
     return text.strip()
 
 HEADING_SEEDS = {
-    "what_is": ["Что представляет собой устройство", "Принцип работы устройства",
-                "Техническая справка", "Общее описание", "Анатомия решения",
-                "Знакомство с устройством", "Главное о продукте", "Для чего создано устройство"],
-    "purpose": ["Сценарии применения", "Место в AV-инсталляции", "Роль и задачи устройства",
-                "Области интеграции", "Целевые объекты", "Для кого создано это решение",
-                "Ищем точку приложения", "Практическое применение"],
-    "features": ["Матрица технических характеристик", "Функциональные возможности",
-                 "Варианты подключения и интерфейсы", "Полный разбор возможностей",
-                 "Логика работы решения", "Полезный функционал", "Ключевые возможности",
-                 "Технические особенности"],
-    "advantages": ["Конструктивные преимущества", "Отличительные инженерные решения",
-                   "Почему эта модель выигрывает", "Схемотехника и надежность",
-                   "Конкурентные отличия", "Важнейшие детали устройства",
-                   "Преимущественные фишки", "Уникальные технологии"],
-    "usage": ["Рекомендации по использованию", "Требования к монтажу",
-              "Особенности эксплуатации", "Практические советы", "Лайфхаки по применению",
-              "Быстрый старт", "Настраиваем устройство", "Способы инсталляции"],
-    "conclusion": ["Технические выводы", "Экспертное заключение", "Реальное применение",
-                   "Устройство стоит своих денег", "Честный вердикт",
-                   "Переход на новый уровень", "Следующий шаг клиента",
-                   "Эффективность применения"],
+    "what_is": ["Что представляет собой устройство", "Принцип работы устройства", "Техническая справка", "Общее описание", "Анатомия решения", "Знакомство с устройством", "Главное о продукте", "Для чего создано устройство"],
+    "purpose": ["Сценарии применения", "Место в AV-инсталляции", "Роль и задачи устройства", "Области интеграции", "Целевые объекты", "Для кого создано это решение", "Ищем точку приложения", "Практическое применение"],
+    "features": ["Матрица технических характеристик", "Функциональные возможности", "Варианты подключения и интерфейсы", "Полный разбор возможностей", "Логика работы решения", "Полезный функционал", "Ключевые возможности", "Технические особенности"],
+    "advantages": ["Конструктивные преимущества", "Отличительные инженерные решения", "Почему эта модель выигрывает", "Схемотехника и надежность", "Конкурентные отличия", "Важнейшие детали устройства", "Преимущественные фишки", "Уникальные технологии"],
+    "usage": ["Рекомендации по использованию", "Требования к монтажу", "Особенности эксплуатации", "Практические советы", "Лайфхаки по применению", "Быстрый старт", "Настраиваем устройство", "Способы инсталляции"],
+    "conclusion": ["Технические выводы", "Экспертное заключение", "Реальное применение", "Устройство стоит своих денег", "Честный вердикт", "Переход на новый уровень", "Следующий шаг клиента", "Эффективность применения"],
 }
 
 def select_seeds():
@@ -104,7 +79,7 @@ def select_seeds():
 def log(msg):
     print(msg, flush=True)
 
-log("pavrus-articles-agent v17 (Playwright, локальный кэш, строгая очистка, АНТИ-НЕЙРОСЛОП)")
+log("pavrus-articles-agent v18 (Playwright, локальный кэш, АНТИ-НЕЙРОСЛОП)")
 
 # ============================================================
 # PLAYWRIGHT: обход JS-защиты Beget
@@ -166,9 +141,7 @@ def get_gigachat_token():
     try:
         credentials = base64.b64encode(f"{GIGACHAT_CLIENT_ID}:{GIGACHAT_CLIENT_SECRET}".encode()).decode()
         r = requests.post("https://ngw.devices.sberbank.ru:9443/api/v2/oauth",
-            headers={"Authorization": f"Basic {credentials}",
-                     "RqUID": str(uuid.uuid4()),
-                     "Content-Type": "application/x-www-form-urlencoded"},
+            headers={"Authorization": f"Basic {credentials}", "RqUID": str(uuid.uuid4()), "Content-Type": "application/x-www-form-urlencoded"},
             data={"scope": GIGACHAT_SCOPE}, timeout=30, verify=False)
         log(f"GigaChat OAuth: статус {r.status_code}")
         if r.status_code != 200:
@@ -193,8 +166,7 @@ def gigachat_chat(prompt, model):
             r = requests.post("https://gigachat.devices.sberbank.ru/api/v1/chat/completions",
                 headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
                 json={"model": model, "temperature": 0.7, "max_tokens": 4000,
-                      "messages": [{"role": "user",
-                                    "content": prompt + "\n\nВАЖНО: Пиши ТОЛЬКО на русском языке."}]},
+                      "messages": [{"role": "user", "content": prompt + "\n\nВАЖНО: Пиши ТОЛЬКО на русском языке."}]},
                 timeout=120, verify=False)
             if r.status_code != 200:
                 log(f"GigaChat chat [{model}]: статус {r.status_code}: {r.text[:200]}")
@@ -338,7 +310,6 @@ def pick_page(urls, hist):
         if not html_text or len(html_text) < 3000:
             log(f"Попытка {attempt+1}: мало данных — {page}")
             continue
-
         if "beget=begetok" in html_text:
             log(f"Попытка {attempt+1}: заглушка Beget — {page}")
             continue
@@ -354,7 +325,7 @@ def pick_page(urls, hist):
     return None, "", "", ""
 
 # ============================================================
-# ЗАГОЛОВКИ + ПОДЗАГОЛОВКИ (строгая очистка)
+# ЗАГОЛОВКИ + ПОДЗАГОЛОВКИ
 # ============================================================
 def generate_headings_and_titles(title, desc, seeds):
     fallback = {
@@ -385,286 +356,4 @@ def generate_headings_and_titles(title, desc, seeds):
     lines = []
     for l in result.split("\n"):
         l = clean_plain(l).strip()
-        if not l or l.startswith(("#", "*", "-", "1.", "2.", "3.", "4.", "5.", "6.", "7.", "8.")):
-            continue
-        if "заголовок" in l.lower() and len(l) < 30:
-            continue
-        lines.append(l)
-
-    if len(lines) < 8:
-        log(f"ИИ вернул {len(lines)} чистых строк вместо 8 — использую запасные")
-        return fallback
-
-    out = {
-        "article_title": lines[0][:120],
-        "news_title": lines[1][:100],
-        "what_is": lines[2][:80], "purpose": lines[3][:80],
-        "features": lines[4][:80], "advantages": lines[5][:80],
-        "usage": lines[6][:80], "conclusion": lines[7][:80],
-    }
-
-    log(f"Заголовок статьи: {out['article_title']}")
-    log(f"Заголовок новости: {out['news_title']}")
-    return out
-
-# ============================================================
-# ГЕНЕРАЦИЯ СТАТЬИ И НОВОСТИ
-# ============================================================
-def generate_article(title, desc, body, url, hd):
-    prompt = (
-        f"Напиши развёрнутую экспертную статью о профессиональном AV-оборудовании PAVRUS.\n\n"
-        f"НАЗВАНИЕ ТОВАРА: {title}\n"
-        f"КРАТКОЕ ОПИСАНИЕ: {desc}\n"
-        f"ТЕХНИЧЕСКИЕ ХАРАКТЕРИСТИКИ: {body[:800]}\n"
-        f"ССЫЛКА НА ТОВАР: {url}\n\n"
-        f"ТРЕБОВАНИЯ К СТАТЬЕ:\n"
-        f"1. Язык: ТОЛЬКО русский.\n"
-        f"2. Длина: СТРОГО 1800-2500 символов. Длиннее 2600 — грубая ошибка!\n"
-        f"3. Формат: ТОЛЬКО чистый HTML: <h2> разделы, <p> абзацы. БЕЗ markdown, БЕЗ ##, БЕЗ эмодзи, БЕЗ id-атрибутов.\n"
-        f"4. НЕ пиши заголовок статьи и слово «СТАТЬЯ» — начинай сразу с первого <h2>.\n"
-        f"5. СТРУКТУРА (именно эти подзаголовки):\n"
-        f"    <h2>{hd['what_is']}</h2> — 2 абзаца\n"
-        f"    <h2>{hd['purpose']}</h2> — 2 абзаца\n"
-        f"    <h2>{hd['features']}</h2> — 2 абзаца\n"
-        f"    <h2>{hd['advantages']}</h2> — 1-2 абзаца\n"
-        f"    <h2>{hd['usage']}</h2> — 1 абзац\n"
-        f"    <h2>{hd['conclusion']}</h2> — 1 абзац\n"
-        f"6. Стиль: эксперт по AV-оборудованию, живо и конкретно, без воды.\n"
-        f"7. Не выдумывай характеристики, которых нет в исходных данных.\n"
-        f"8. В последнем абзаце: «По всем вопросам обращайтесь к специалистам компании PAVRUS».\n"
-        f"9. 🛡️ АНТИ-НЕЙРОСЛОП: ЗАПРЕЩЕНО использовать слова: 'инновационный', 'революционный', 'в современном мире', 'стоит отметить', 'важно понимать', 'безусловно', 'играет ключевую роль', 'представляет собой', 'является'. Пиши как живой эксперт-практик, используй активный залог и конкретные факты."
-    )
-    article = ai_gigachat(prompt, minlen=1500)
-    if not article:
-        log("Объёмная статья не получилась — вторая попытка")
-        prompt2 = (
-            f"Статья о товаре PAVRUS «{title}». Описание: {desc}. Характеристики: {body[:500]}.\n"
-            f"1500-2200 символов, чистый HTML (<h2>, <p>), без markdown и эмодзи, без заголовка в начале. Подзаголовки:\n"
-            f"- {hd['what_is']}\n- {hd['purpose']}\n- {hd['features']}\n"
-            f"- {hd['advantages']}\n- {hd['usage']}\n- {hd['conclusion']}\n"
-            f"В конце: «По всем вопросам обращайтесь к специалистам компании PAVRUS». "
-        )
-        article = ai_gigachat(prompt2, minlen=1200)
-    if not article:
-        return None
-    
-    # 🛡️ ПРИНУДИТЕЛЬНАЯ ОЧИСТКА ОТ НЕЙРОСЛОПА
-    article = clean_slop(article)
-    article = sanitize_ai_html(article)
-    article = trim_article(article, 2600)
-    return article
-
-def generate_news_from_article(article, title, hd):
-    plain = clean_plain(article)
-    prompt = (
-        f"Сожми статью в короткую новость.\n\nСТАТЬЯ:\n{plain[:1800]}\n\nТОВАР: {title}\n\n"
-        f"ТРЕБОВАНИЯ:\n"
-        f"1. ТОЛЬКО русский язык.\n"
-        f"2. Длина СТРОГО 500-700 символов.\n"
-        f"3. Верни ТОЛЬКО тело новости БЕЗ заголовка: 3-4 абзаца <p> и 1-2 подзаголовка <h2> внутри текста.\n"
-        f"4. Формат: чистый HTML, БЕЗ markdown, БЕЗ ##, БЕЗ эмодзи, БЕЗ id-атрибутов.\n"
-        f"5. Содержание: что за товар, главное применение, ключевая особенность.\n"
-        f"6. В конце: «Подробнее — у специалистов PAVRUS».\n"
-        f"7. 🛡️ АНТИ-НЕЙРОСЛОП: ЗАПРЕЩЕНО использовать слова: 'инновационный', 'революционный', 'в современном мире', 'стоит отметить', 'важно понимать', 'безусловно', 'играет ключевую роль', 'представляет собой', 'является'."
-    )
-    news = ai_gigachat(prompt, minlen=400)
-    if news:
-        news = clean_slop(news)
-        news = sanitize_ai_html(news)
-        if len(news) > 800:
-            news = news[:800].rsplit("</p>", 1)[0] + "</p>"
-        return news
-    log("Новость не сжалась — собираю из первых предложений статьи")
-    sentences = re.split(r"(?<=.)\s+", plain)
-    out = []
-    for s in sentences:
-        s = s.strip()
-        if len(s) < 20:
-            continue
-        out.append(s)
-        if len(" ".join(out)) >= 500:
-            break
-    text = " ".join(out)
-    if len(text) > 650:
-        text = text[:650].rsplit(". ", 1)[0] + "."
-    return f"<p>{text}</p><h2>Где узнать больше</h2><p>Подробнее — у специалистов PAVRUS.</p>"
-
-# ============================================================
-# СОЗДАНИЕ DOCX
-# ============================================================
-def html_to_lines(text):
-    t = re.sub(r"<h2[^>]*>(.*?)</h2>", r"\n## \1\n", text, flags=re.S | re.I)
-    t = re.sub(r"<h3[^>]*>(.*?)</h3>", r"\n### \1\n", t, flags=re.S | re.I)
-    t = re.sub(r"<p[^>]*>(.*?)</p>", r"\n\1\n", t, flags=re.S | re.I)
-    t = re.sub(r"<[^>]+>", "", t)
-    return [l.strip() for l in t.split("\n") if l.strip()]
-
-def add_body(doc, text):
-    for line in html_to_lines(text):
-        if line.startswith("### "):
-            doc.add_heading(line[4:], 3)
-        elif line.startswith("## "):
-            doc.add_heading(line[3:], 2)
-        else:
-            doc.add_paragraph(line)
-
-def create_docx(title, article_title, news_title, article, news, url, date_str, slug):
-    if not DOCX_OK:
-        log("python-docx не установлен — DOCX создать невозможно")
-        return None
-    doc = Document()
-    doc.add_heading(f"PAVRUS: {title}", 0)
-    doc.add_paragraph(f"Дата: {date_str}")
-    doc.add_paragraph(f"Ссылка: {url}")
-    doc.add_paragraph("")
-    doc.add_paragraph("СТАТЬЯ")
-    doc.add_paragraph(article_title)
-    add_body(doc, article)
-    doc.add_page_break()
-    doc.add_paragraph("НОВОСТЬ")
-    doc.add_paragraph(news_title)
-    add_body(doc, news)
-    os.makedirs("articles_output", exist_ok=True)
-    path = f"articles_output/{date_str}_{slug}.docx"
-    doc.save(path)
-    log(f"DOCX создан: {path}")
-    return path
-
-# ============================================================
-# ОТПРАВКА НА ПОЧТУ
-# ============================================================
-def send_email(subject, body_text, attachment_path):
-    if not SMTP_HOST or not SMTP_USER or not SMTP_PASS or not EMAIL_TO:
-        log("SMTP-настройки не заданы — пропуск отправки на почту")
-        return False
-    try:
-        msg = MIMEMultipart()
-        msg['From'] = SMTP_USER
-        msg['To'] = EMAIL_TO
-        msg['Subject'] = subject
-        msg.attach(MIMEText(body_text, 'plain', 'utf-8'))
-        if os.path.exists(attachment_path):
-            with open(attachment_path, "rb") as f:
-                part = MIMEBase('application', 'octet-stream')
-                part.set_payload(f.read())
-            encoders.encode_base64(part)
-            filename = os.path.basename(attachment_path)
-            part.add_header('Content-Disposition', f'attachment; filename="{filename}"')
-            msg.attach(part)
-        port = int(SMTP_PORT)
-        if port == 465:
-            server = smtplib.SMTP_SSL(SMTP_HOST, port, timeout=30)
-        else:
-            server = smtplib.SMTP(SMTP_HOST, port, timeout=30)
-            server.starttls()
-        server.login(SMTP_USER, SMTP_PASS)
-        server.send_message(msg)
-        server.quit()
-        log(f"Письмо отправлено на {EMAIL_TO}")
-        return True
-    except Exception as e:
-        log(f"Ошибка отправки письма: {e}")
-        return False
-
-# ============================================================
-# ГЛАВНАЯ ЛОГИКА
-# ============================================================
-def main():
-    try:
-        cache = json.load(open(CACHE, encoding="utf-8"))
-        urls = cache.get("urls", [])
-        if not urls:
-            log("sitemap_cache.json пуст")
-            sys.exit(1)
-        log(f"Локальный кэш: {len(urls)} ссылок")
-    except FileNotFoundError:
-        log(f"Файл {CACHE} не найден! Сначала создайте его через браузер и make_cache.py")
-        sys.exit(1)
-
-    pavrus_urls = [u for u in urls if is_pavrus_brand(u)]
-    log(f"URL с брендом PAVRUS: {len(pavrus_urls)} из {len(urls)}")
-    if not pavrus_urls:
-        log("Нет URL с брендом PAVRUS")
-        sys.exit(1)
-
-    try:
-        hist = set(json.load(open(HISTORY, encoding="utf-8"))) if os.path.exists(HISTORY) else set()
-    except Exception:
-        hist = set()
-
-    pw_ok = pw_init()
-    if not pw_ok:
-        log("Playwright не запустился — выход")
-        sys.exit(1)
-
-    page, title, desc, body = pick_page(pavrus_urls, hist)
-    if not page:
-        log("Не найдена подходящая страница PAVRUS")
-        pw_close()
-        sys.exit(1)
-
-    log("Этап 3: заголовки + подзаголовки + статья (1800-2500 симв.)...")
-    seeds = select_seeds()
-    hd = generate_headings_and_titles(title, desc, seeds)
-    article = generate_article(title, desc, body, page, hd)
-    if not article:
-        log("GigaChat не смог написать статью — выход")
-        pw_close()
-        sys.exit(1)
-
-    log("Этап 4: генерация новости (500-700 симв.)...")
-    news = generate_news_from_article(article, title, hd)
-    if not news:
-        log("Новость не создана — выход")
-        pw_close()
-        sys.exit(1)
-
-    hist.add(page)
-    json.dump(sorted(hist), open(HISTORY, "w", encoding="utf-8"), ensure_ascii=False)
-
-    log("=" * 60)
-    log(f"ТОВАР PAVRUS: {title}")
-    log(f"ССЫЛКА: {page}")
-    log(f"ЗАГОЛОВОК СТАТЬИ: {hd['article_title']}")
-    log(f"ЗАГОЛОВОК НОВОСТИ: {hd['news_title']}")
-    log("=" * 60)
-    log(f"СТАТЬЯ: {len(article)} симв.")
-    log(f"НОВОСТЬ: {len(news)} симв.")
-    log("=" * 60)
-
-    slug = re.sub(r"[^a-z0-9]+", "-", title.lower())[:50]
-    date_str = datetime.date.today().strftime("%Y-%m-%d")
-    docx_path = create_docx(title, hd["article_title"], hd["news_title"],
-                            article, news, page, date_str, slug)
-    if not docx_path:
-        log("DOCX не создан — выход")
-        pw_close()
-        sys.exit(1)
-
-    subject = f"PAVRUS: {title} — статья и новость {date_str}"
-    body = (f"Добрый день!\n\n"
-            f"Сгенерирована статья о товаре PAVRUS.\n\n"
-            f"Товар: {title}\n"
-            f"Ссылка: {page}\n\n"
-            f"Заголовок статьи: {hd['article_title']}\n"
-            f"Заголовок новости: {hd['news_title']}\n\n"
-            f"Длина статьи: {len(article)} симв.\n"
-            f"Длина новости: {len(news)} симв.\n\n"
-            f"Во вложении — DOCX со статьёй и новостью для ручной публикации.\n\n"
-            f"С уважением,\nPAVRUS Articles Agent")
-
-    send_email(subject, body, docx_path)
-
-    pw_close()
-    log("=" * 50)
-    log("FINISH: статья + новость отправлены на почту!")
-    log("=" * 50)
-
-if __name__ == "__main__":
-    try:
-        main()
-    except Exception as e:
-        log(f"КРИТИЧЕСКАЯ ОШИБКА: {e}")
-        import traceback
-        log(traceback.format_exc())
-        raise
+        if not l or l.startswith(("#
