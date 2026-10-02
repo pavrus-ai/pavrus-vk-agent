@@ -2,9 +2,8 @@ name: pavrus-articles-agent
 
 on:
   schedule:
-    # Запуск каждый день в 11:00 МСК (08:00 UTC)
     - cron: '0 8 * * *'
-  workflow_dispatch:  # Ручной запуск кнопкой
+  workflow_dispatch:
 
 jobs:
   run-articles-agent:
