@@ -32,7 +32,6 @@ SITE = "https://pavrus.ru"
 HISTORY = "articles_history.json"
 CACHE = "sitemap_cache.json"
 
-UA = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
 BRAND_SLUG = "pavrus"
 
 EMOJI_RE = re.compile(
@@ -307,31 +306,29 @@ def parse_page(html_text):
 def pick_page(urls, hist):
     avail = [u for u in urls if u not in hist] or urls
     random.shuffle(avail)
-    
+
     for attempt, page in enumerate(avail[:12]):
-        # Скачиваем через Playwright (обход Beget)
         html_text = pw_get_page(page)
         if not html_text or len(html_text) < 3000:
             log(f"Попытка {attempt+1}: мало данных — {page}")
             continue
-        
-        # Проверяем, не получили ли заглушку Beget
+
         if "beget=begetok" in html_text:
             log(f"Попытка {attempt+1}: заглушка Beget — {page}")
             continue
-        
+
         h1, desc, body = parse_page(html_text)
         if not h1 or (len(body) + len(desc)) < 50:
             log(f"Попытка {attempt+1}: мало текста — {page}")
             continue
-        
+
         log(f"Товар PAVRUS: {h1[:70]} — {page}")
         return page, h1, desc, body
-    
+
     return None, "", "", ""
 
 # ============================================================
-# ЗАГОЛОВКИ + ПОДЗАГОЛОВКИ
+# ЗАГОЛОВКИ + ПОДЗАГОЛОВКИ (строгая очистка)
 # ============================================================
 def generate_headings_and_titles(title, desc, seeds):
     fallback = {
@@ -341,7 +338,7 @@ def generate_headings_and_titles(title, desc, seeds):
         "features": seeds["features"], "advantages": seeds["advantages"],
         "usage": seeds["usage"], "conclusion": seeds["conclusion"],
     }
-    
+
     prompt = (
         f"Ты — эксперт по профессиональному AV-оборудованию PAVRUS.\n"
         f"Придумай для статьи о товаре:\n"
@@ -353,25 +350,23 @@ def generate_headings_and_titles(title, desc, seeds):
         f"4. {seeds['advantages']}\n5. {seeds['usage']}\n6. {seeds['conclusion']}\n\n"
         f"КРИТИЧЕСКИ ВАЖНО: Ответь СТРОГО 8 строками текста. БЕЗ markdown, БЕЗ символов #, *, БЕЗ нумерации (1., 2.), БЕЗ вводных слов типа 'Вот заголовки'. Просто 8 строк текста."
     )
-    
+
     result = gigachat_chat(prompt, GIGACHAT_MODEL or "GigaChat:latest")
     if not result:
-        log("⚠️ Заголовки не сгенерированы — использую запасные")
+        log("Заголовки не сгенерированы — использую запасные")
         return fallback
 
     lines = []
     for l in result.split("\n"):
         l = clean_plain(l).strip()
-        # Игнорируем пустые строки, markdown и нумерацию
         if not l or l.startswith(("#", "*", "-", "1.", "2.", "3.", "4.", "5.", "6.", "7.", "8.")):
             continue
-        # Игнорируем мусорные фразы ИИ
         if "заголовок" in l.lower() and len(l) < 30:
             continue
         lines.append(l)
 
     if len(lines) < 8:
-        log(f"⚠️ ИИ вернул {len(lines)} чистых строк вместо 8 — использую запасные")
+        log(f"ИИ вернул {len(lines)} чистых строк вместо 8 — использую запасные")
         return fallback
 
     out = {
@@ -381,9 +376,9 @@ def generate_headings_and_titles(title, desc, seeds):
         "features": lines[4][:80], "advantages": lines[5][:80],
         "usage": lines[6][:80], "conclusion": lines[7][:80],
     }
-    
-    log(f"📰 Заголовок статьи: {out['article_title']}")
-    log(f"📰 Заголовок новости: {out['news_title']}")
+
+    log(f"Заголовок статьи: {out['article_title']}")
+    log(f"Заголовок новости: {out['news_title']}")
     return out
 
 # ============================================================
@@ -543,7 +538,7 @@ def send_email(subject, body_text, attachment_path):
 # ГЛАВНАЯ ЛОГИКА
 # ============================================================
 def main():
-    # 1. Читаем локальный кэш (не стучимся на сайт!)
+    # 1. Читаем локальный кэш
     try:
         cache = json.load(open(CACHE, encoding="utf-8"))
         urls = cache.get("urls", [])
@@ -555,14 +550,12 @@ def main():
         log(f"Файл {CACHE} не найден! Сначала создайте его через браузер и make_cache.py")
         sys.exit(1)
 
-    # Фильтруем только PAVRUS
     pavrus_urls = [u for u in urls if is_pavrus_brand(u)]
     log(f"URL с брендом PAVRUS: {len(pavrus_urls)} из {len(urls)}")
     if not pavrus_urls:
         log("Нет URL с брендом PAVRUS")
         sys.exit(1)
 
-    # История
     try:
         hist = set(json.load(open(HISTORY, encoding="utf-8"))) if os.path.exists(HISTORY) else set()
     except Exception:
@@ -598,7 +591,6 @@ def main():
         pw_close()
         sys.exit(1)
 
-    # Сохраняем в историю
     hist.add(page)
     json.dump(sorted(hist), open(HISTORY, "w", encoding="utf-8"), ensure_ascii=False)
 
@@ -634,7 +626,7 @@ def main():
             f"Длина новости: {len(news)} симв.\n\n"
             f"Во вложении — DOCX со статьёй и новостью для ручной публикации.\n\n"
             f"С уважением,\nPAVRUS Articles Agent")
-    
+
     send_email(subject, body, docx_path)
 
     pw_close()
