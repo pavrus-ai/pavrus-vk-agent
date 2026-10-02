@@ -4,7 +4,7 @@ from PIL import Image
 urllib3.disable_warnings()
 
 # ============================================================
-# КОНФИГУРАЦИЯ (ВСЕ ПРОБЕЛЫ УДАЛЕНЫ)
+# КОНФИГУРАЦИЯ (ВСЕ ПРОБЕЛЫ ВНУТРИ КАВЫЧЕК УДАЛЕНЫ)
 # ============================================================
 VK_TOKEN = os.environ.get("VK_TOKEN", "").strip()
 VK_USER_TOKEN = os.environ.get("VK_USER_TOKEN", "").strip()
@@ -36,38 +36,26 @@ BL = ["корзин", "кабинет", "избранн", "сравнени", "�
       "цена:", "руб", "₽", "купить", "оформить заказ", "в наличии", "под заказ",
       "артикул", "арт.", "гаранти", "доставк", "cookie", "политик"]
 
-# 🛡️ АНТИ-НЕЙРОСЛОП: список запрещенных ИИ-клише и их замен
+# 🛡️ АНТИ-НЕЙРОСЛОП
 ANTI_SLOP_REPLACEMENTS = {
-    "представляет собой": "",
-    "является": "",
-    "стоит отметить": "",
-    "важно понимать": "",
-    "безусловно": "",
-    "в современном мире": "",
-    "играет ключевую роль": "",
-    "инновационный": "современный",
-    "революционный": "новый",
-    "подводя итог": "",
-    "в заключение": "",
-    "таким образом": "",
-    "не стоит забывать": "",
-    "следует отметить": ""
+    "представляет собой": "", "является": "", "стоит отметить": "",
+    "важно понимать": "", "безусловно": "", "в современном мире": "",
+    "играет ключевую роль": "", "инновационный": "современный",
+    "революционный": "новый", "подводя итог": "", "в заключение": "",
+    "таким образом": "", "не стоит забывать": "", "следует отметить": ""
 }
 
 def clean_slop(text):
-    """Вычищает ИИ-клише из текста"""
     for slop, replacement in ANTI_SLOP_REPLACEMENTS.items():
         text = re.sub(r"\b" + slop + r"\b", replacement, text, flags=re.IGNORECASE)
-    # Убираем двойные пробелы, возникшие после удаления слов
     text = re.sub(r"\s+", " ", text)
-    # Убираем пробелы перед знаками препинания
     text = re.sub(r"\s+([.,;:!?])", r"\1", text)
     return text.strip()
 
 def log(msg):
     print(msg, flush=True)
 
-log("pavrus-vk-agent v51 (Playwright, локальный кэш, ОДИН пост, АНТИ-НЕЙРОСЛОП)")
+log("pavrus-vk-agent v52 (Playwright, локальный кэш, ОДИН пост, АНТИ-НЕЙРОСЛОП)")
 
 # ============================================================
 # PLAYWRIGHT: обход JS-защиты Beget
@@ -266,7 +254,7 @@ def ai_call(prompt, minlen=700):
 # ============================================================
 # ВК (с защитой от Flood Control)
 # ============================================================
-def vk_call(method, params, token, retries=3):
+def vk_call(method, params, token, retries=5):
     p = dict(params or {})
     p["access_token"] = token
     p["v"] = VK_V
@@ -276,8 +264,8 @@ def vk_call(method, params, token, retries=3):
             if "error" in r:
                 err = r["error"]
                 if err.get("error_code") == 9:
-                    delay = 5 * (attempt + 1)
-                    log(f"VK Flood control. Ждем {delay} сек и пробуем снова...")
+                    delay = 10 * (attempt + 1)
+                    log(f"VK Flood control. Ждем {delay} сек (попытка {attempt+1}/{retries})...")
                     time.sleep(delay)
                     continue
                 log(f"VK {method} error: {err}")
@@ -285,7 +273,8 @@ def vk_call(method, params, token, retries=3):
             return r.get("response")
         except Exception as e:
             log(f"VK {method} exception: {e}")
-            time.sleep(2)
+            time.sleep(5)
+    log(f"VK {method}: все {retries} попыток исчерпаны")
     return None
 
 def vk_upload(img_bytes):
@@ -297,7 +286,6 @@ def vk_upload(img_bytes):
         return None
 
     log(f"Загрузка фото в ВК: {len(img_bytes)} байт")
-
     try:
         im = Image.open(io.BytesIO(img_bytes))
         log(f"Формат: {im.format}, Размер: {im.size[0]}x{im.size[1]}, Режим: {im.mode}")
@@ -310,39 +298,45 @@ def vk_upload(img_bytes):
     except Exception as e:
         log(f"Ошибка проверки картинки: {e}")
 
-    srv = vk_call("photos.getWallUploadServer", {"owner_id": "-" + VK_GROUP_ID}, VK_USER_TOKEN)
+    srv = vk_call("photos.getWallUploadServer", {"owner_id": "-" + VK_GROUP_ID}, VK_USER_TOKEN, retries=5)
     if not srv or "upload_url" not in srv:
-        log("Не получен upload server URL")
+        log("Не получен upload server URL после 5 попыток")
         return None
 
-    try:
-        r = requests.post(srv["upload_url"],
-                         files={"photo": ("product.jpg", img_bytes, "image/jpeg")},
-                         timeout=120)
-        r_json = r.json()
-        if not r_json.get("photo"):
-            log(f"Пустое photo в ответе: {r_json}")
-            return None
+    for attempt in range(3):
+        try:
+            r = requests.post(srv["upload_url"],
+                             files={"photo": ("product.jpg", img_bytes, "image/jpeg")},
+                             timeout=120)
+            r_json = r.json()
+            if not r_json.get("photo"):
+                log(f"Пустое photo в ответе (попытка {attempt+1}): {r_json}")
+                if attempt < 2:
+                    time.sleep(10 * (attempt + 1))
+                    continue
+                return None
 
-        sp = {"owner_id": "-" + VK_GROUP_ID,
-              "photo": r_json["photo"],
-              "server": r_json.get("server", ""),
-              "hash": r_json.get("hash", "")}
+            sp = {"owner_id": "-" + VK_GROUP_ID,
+                  "photo": r_json["photo"],
+                  "server": r_json.get("server", ""),
+                  "hash": r_json.get("hash", "")}
 
-        saved = vk_call("photos.saveWallPhoto", sp, VK_USER_TOKEN)
-        if saved:
-            p = saved[0]
-            att = f"photo{p['owner_id']}_{p['id']}"
-            if p.get("access_key"):
-                att += f"_{p['access_key']}"
-            log(f"Фото загружено: {att}")
-            return att
-        else:
-            log("photos.saveWallPhoto вернул None")
-            return None
-    except Exception as e:
-        log(f"Ошибка загрузки фото: {e}")
-        return None
+            saved = vk_call("photos.saveWallPhoto", sp, VK_USER_TOKEN, retries=5)
+            if saved:
+                p = saved[0]
+                att = f"photo{p['owner_id']}_{p['id']}"
+                if p.get("access_key"):
+                    att += f"_{p['access_key']}"
+                log(f"Фото загружено: {att}")
+                return att
+            else:
+                log("photos.saveWallPhoto вернул None")
+                return None
+        except Exception as e:
+            log(f"Ошибка загрузки фото (попытка {attempt+1}): {e}")
+            if attempt < 2:
+                time.sleep(10 * (attempt + 1))
+    return None
 
 def vk_post(message, att):
     log(f"Публикация в ВК: {len(message)} симв., attachment: {att}")
@@ -353,7 +347,7 @@ def vk_post(message, att):
     else:
         log("Публикуем БЕЗ фото!")
 
-    res = vk_call("wall.post", params, VK_TOKEN)
+    res = vk_call("wall.post", params, VK_TOKEN, retries=5)
     if res:
         log(f"ВК: пост опубликован: https://vk.com/wall-{VK_GROUP_ID}_{res.get('post_id')}")
         return True
@@ -423,7 +417,6 @@ def main():
     random.shuffle(avail)
 
     pw_ok = pw_init()
-
     page = title = desc = body = None
     img = None
 
@@ -439,7 +432,6 @@ def main():
 
         if not r_text or len(r_text) < 3000:
             continue
-
         if "beget=begetok" in r_text:
             log(f"Заглушка Beget на {u}")
             continue
@@ -466,7 +458,6 @@ def main():
     hist.add(page)
     json.dump(sorted(hist), open(HISTORY, "w", encoding="utf-8"), ensure_ascii=False)
 
-    # 🛡️ ПРОМПТ С АНТИ-НЕЙРОСЛОПОМ
     prompt = (
         f"Напиши пост о товаре для ВКонтакте, Telegram и Дзена.\n\n"
         f"ТОВАР: {title}\n"
@@ -481,38 +472,31 @@ def main():
         f"6. Подчеркни применение: конференц-залы, презентации, мероприятия.\n"
         f"7. В конце: «Напишите нам в сообщения группы — расскажем подробнее».\n"
         f"8. БЕЗ хэштегов и ссылок (http, https, www, pavrus.ru).\n"
-        f"9. 🛡️ АНТИ-НЕЙРОСЛОП: ЗАПРЕЩЕНО использовать слова: 'инновационный', 'революционный', 'в современном мире', 'стоит отметить', 'важно понимать', 'безусловно', 'играет ключевую роль', 'представляет собой', 'является'. Пиши как живой эксперт-практик, используй активный залог и конкретные факты."
+        f"9. 🛡️ АНТИ-НЕЙРОСЛОП: ЗАПРЕЩЕНО использовать слова: 'инновационный', 'революционный', 'в современном мире', 'стоит отметить', 'важно понимать', 'безусловно', 'играет ключевую роль', 'представляет собой', 'является'. Пиши как живой эксперт-практик."
     )
 
     text = ai_call(prompt, 700)
     if not text:
         text = f"Современное оборудование для конференц-залов и масштабных мероприятий.\n\n{desc}\n\nНапишите нам в сообщения группы — расскажем подробнее!"
 
-    # 🛡️ ПРИНУДИТЕЛЬНАЯ ОЧИСТКА ОТ НЕЙРОСЛОПА
     text = clean_slop(text)
-    
-    # Очистка от markdown и ссылок
     text = text.replace("**", "").replace("##", "").strip()
     text = re.sub(r"^#.*\n", "", text, flags=re.M)
     text = re.sub(r"https?://\S+", "", text)
     text = re.sub(r"pavrus\.ru\S*", "", text, flags=re.I)
     text = re.sub(r"Подробнее:\s*", "", text, flags=re.I)
 
-    # Убираем повтор названия товара в начале
     lines = text.split('\n')
     cleaned = []
     for line in lines:
         line = line.strip()
-        if not line:
-            continue
-        if line.startswith('#'):
+        if not line or line.startswith('#'):
             continue
         if len(cleaned) == 0 and title.lower() in line.lower() and len(line) < len(title) + 30:
             continue
         cleaned.append(line)
     text = '\n'.join(cleaned).strip()
 
-    # Обрезаем по последнему полному предложению до 1000 символов
     if len(text) > 1000:
         cut_pos = text.rfind('.', 0, 1000)
         if cut_pos > 800:
@@ -527,7 +511,6 @@ def main():
 
     log(f"Текст поста: {len(text)} симв.")
 
-    # Публикация
     att = vk_upload(img) if img else None
     log(f"Attachment для ВК: {att if att else 'None'}")
 
