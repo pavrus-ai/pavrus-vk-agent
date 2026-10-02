@@ -1,359 +1,487 @@
 # -*- coding: utf-8 -*-
-import os, re, json, random, sys, time, datetime, requests, html, base64, uuid, smtplib
-from email.mime.multipart import MIMEMultipart
-from email.mime.text import MIMEText
-from email.mime.base import MIMEBase
-from email import encoders
-import warnings
-from requests.packages.urllib3.exceptions import InsecureRequestWarning
-warnings.simplefilter('ignore', InsecureRequestWarning)
-
-try:
-    from docx import Document
-    DOCX_OK = True
-except ImportError:
-    DOCX_OK = False
-
-# ============================================================
-# КОНФИГУРАЦИЯ (ВСЕ ПРОБЕЛЫ ВНУТРИ КАВЫЧЕК УДАЛЕНЫ)
-# ============================================================
-GIGACHAT_CLIENT_ID = os.environ.get("GIGACHAT_CLIENT_ID", "").strip()
-GIGACHAT_CLIENT_SECRET = os.environ.get("GIGACHAT_CLIENT_SECRET", "").strip()
-GIGACHAT_SCOPE = os.environ.get("GIGACHAT_SCOPE", "GIGACHAT_API_PERS").strip()
-GIGACHAT_MODEL = os.environ.get("GIGACHAT_MODEL", "GigaChat-Pro").strip()
-
-SMTP_HOST = os.environ.get("SMTP_HOST", "").strip()
-SMTP_PORT = os.environ.get("SMTP_PORT", "587").strip()
-SMTP_USER = os.environ.get("SMTP_USER", "").strip()
-SMTP_PASS = os.environ.get("SMTP_PASS", "").strip()
-EMAIL_TO = os.environ.get("EMAIL_TO", "").strip()
+"""
+pavrus-articles-agent v33
+Берёт материал со сайта pavrus.ru (sitemap → кэш любого возраста),
+пишет статью 2000-2500 символов с анти-слопом и отправляет её по почте.
+История отправок и кэш карты сайта — JSON-файлы в репозитории.
+"""
+import os, json, datetime, time, re, html, smtplib, urllib3, requests
+from urllib.parse import urljoin
+from email.message import EmailMessage
+urllib3.disable_warnings()
 
 SITE = "https://pavrus.ru"
-HISTORY = "articles_history.json"
-CACHE = "sitemap_cache.json"
+SITEMAP_CACHE = "sitemap_cache.json"
+SENT_HISTORY = "sent_history.json"
 
-BRAND_SLUG = "pavrus"
+BROWSER_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+              "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
 
-EMOJI_RE = re.compile(
-    "[\U0001F300-\U0001FAFF\U00002600-\U000027BF\U0001F000-\U0001F02F\u2B00-\u2BFF\uFE0F]",
-    flags=re.UNICODE)
+# AI-ключи
+GIGACHAT_CLIENT_ID = os.environ.get("GIGACHAT_CLIENT_ID1", "").strip()
+GIGACHAT_CLIENT_SECRET = os.environ.get("GIGACHAT_CLIENT_SECRET1", "").strip()
+CEREBRAS_KEY = os.environ.get("CEREBRAS_KEY", "").strip()
+MISTRAL_KEY = os.environ.get("MISTRAL_KEY", "").strip()
+GROQ_KEY = os.environ.get("GROQ_KEY", "").strip()
+GROQ_KEY2 = os.environ.get("GROQ_KEY2", "").strip()
+OR_KEY = os.environ.get("OPENROUTER_KEY", "").strip()
+OR_KEY2 = os.environ.get("OPENROUTER_KEY2", "").strip()
 
-JUNK_PATTERNS = [
-    r"Санкт-Петербург|Москва|Новосибирск|Краснодар|Красноярск",
-    r"Войти|Выйти|Регистрация|Личный кабинет",
-    r"Каталог|Компания|Информация|Контакты|Доставка|Оплата",
-    r"Заказать звонок|Обратная связь|Назад к списку",
-    r"Выбрать автоматически|Ваш город",
-    r"8 \(800|info@|показать еще",
-    r"корзин|кабинет|избранн|сравнени",
-]
+# Почта
+SMTP_HOST = os.environ.get("SMTP_HOST", "").strip()
+SMTP_PORT = int(os.environ.get("SMTP_PORT", "465").strip() or 465)
+SMTP_LOGIN = os.environ.get("SMTP_LOGIN", "").strip()
+SMTP_PASSWORD = os.environ.get("SMTP_PASSWORD", "").strip()
+MAIL_FROM = os.environ.get("MAIL_FROM", "").strip() or SMTP_LOGIN
+MAIL_TO = [x.strip() for x in os.environ.get("MAIL_TO", "").split(",") if x.strip()]
 
-# 🛡️ АНТИ-НЕЙРОСЛОП
-ANTI_SLOP_REPLACEMENTS = {
-    "представляет собой": "", "является": "", "стоит отметить": "",
-    "важно понимать": "", "безусловно": "", "в современном мире": "",
-    "играет ключевую роль": "", "инновационный": "современный",
-    "революционный": "новый", "подводя итог": "", "в заключение": "",
-    "таким образом": "", "не стоит забывать": "", "следует отметить": ""
-}
+RU = "\n\nВАЖНО: Пиши ТОЛЬКО на русском языке."
+GROQ_MODELS = ["meta-llama/llama-4-scout-17b-16e-instruct",
+               "meta-llama/llama-4-maverick-17b-128e-instruct",
+               "openai/gpt-oss-120b",
+               "llama-3.1-8b-instant"]
 
-def clean_slop(text):
-    for slop, replacement in ANTI_SLOP_REPLACEMENTS.items():
-        text = re.sub(r"\b" + slop + r"\b", replacement, text, flags=re.IGNORECASE)
-    text = re.sub(r"\s+", " ", text)
-    text = re.sub(r"\s+([.,;:!?])", r"\1", text)
-    return text.strip()
-
-HEADING_SEEDS = {
-    "what_is": ["Что представляет собой устройство", "Принцип работы устройства", "Техническая справка", "Общее описание", "Анатомия решения", "Знакомство с устройством", "Главное о продукте", "Для чего создано устройство"],
-    "purpose": ["Сценарии применения", "Место в AV-инсталляции", "Роль и задачи устройства", "Области интеграции", "Целевые объекты", "Для кого создано это решение", "Ищем точку приложения", "Практическое применение"],
-    "features": ["Матрица технических характеристик", "Функциональные возможности", "Варианты подключения и интерфейсы", "Полный разбор возможностей", "Логика работы решения", "Полезный функционал", "Ключевые возможности", "Технические особенности"],
-    "advantages": ["Конструктивные преимущества", "Отличительные инженерные решения", "Почему эта модель выигрывает", "Схемотехника и надежность", "Конкурентные отличия", "Важнейшие детали устройства", "Преимущественные фишки", "Уникальные технологии"],
-    "usage": ["Рекомендации по использованию", "Требования к монтажу", "Особенности эксплуатации", "Практические советы", "Лайфхаки по применению", "Быстрый старт", "Настраиваем устройство", "Способы инсталляции"],
-    "conclusion": ["Технические выводы", "Экспертное заключение", "Реальное применение", "Устройство стоит своих денег", "Честный вердикт", "Переход на новый уровень", "Следующий шаг клиента", "Эффективность применения"],
-}
-
-def select_seeds():
-    return {k: random.choice(v) for k, v in HEADING_SEEDS.items()}
+ANTI_SLOP = ("Пиши неровно и конкретно: разная длина предложений, детали вместо оценок; "
+             "ЗАПРЕЩЕНЫ клише «погружает», «не оставит равнодушным», «захватывает с первых страниц», "
+             "«судьбы переплетаются», «заставляет задуматься», «не только…, но и…», вилки «от… до…», "
+             "итоговые резюме «таким образом»; не более одного тире на абзац и одного восклицания на текст.")
 
 def log(msg):
     print(msg, flush=True)
 
-log("pavrus-articles-agent v18 (Playwright, локальный кэш, АНТИ-НЕЙРОСЛОП)")
+log("Версия ℹ️ pavrus-articles-agent v33 (кэш карты любого возраста; browser UA + retry; история в JSON; статьи 2000-2500; анти-слоп; ссылка только в подвале письма)")
 
 # ============================================================
-# PLAYWRIGHT: обход JS-защиты Beget
+# СЕТЬ И КАРТА САЙТА
 # ============================================================
-_pw_browser = None
-_pw_context = None
 
-def pw_init():
-    global _pw_browser, _pw_context
+def http_get(url, timeout=30, tries=3):
+    for i in range(tries):
+        try:
+            r = requests.get(url, timeout=timeout,
+                             headers={"User-Agent": BROWSER_UA,
+                                      "Accept-Language": "ru,en;q=0.8"})
+            log(f"ℹ️ GET {url} → статус {r.status_code}, {len(r.content)} байт")
+            return r
+        except Exception as e:
+            log(f"⚠️ GET {url} попытка {i+1}: {str(e)[:80]}")
+            time.sleep(5 * (i + 1))
+    return None
+
+def fetch_sitemap():
+    for sm in ("/sitemap.xml", "/sitemap-index.xml", "/sitemap_index.xml", "/wp-sitemap.xml"):
+        r = http_get(SITE + sm)
+        if r is not None and r.ok and ("<urlset" in r.text or "<sitemapindex" in r.text):
+            urls = re.findall(r"<loc>\s*([^<\s]+)\s*</loc>", r.text)
+            if urls:
+                return sorted(set(urls))
+    r = http_get(SITE + "/")
+    if r is not None and r.ok:
+        urls = [urljoin(SITE, u) for u in re.findall(r'href="([^"]+)"', r.text)]
+        return sorted({u for u in urls if u.startswith(SITE)})
+    return []
+
+def save_sitemap_cache(urls):
     try:
-        from playwright.sync_api import sync_playwright
-        pw = sync_playwright().start()
-        _pw_browser = pw.chromium.launch(headless=True)
-        _pw_context = _pw_browser.new_context(
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-            locale="ru-RU"
-        )
-        log("Playwright Chromium запущен")
-        return True
+        json.dump({"updated": datetime.date.today().toordinal(),
+                   "date": str(datetime.date.today()),
+                   "urls": urls},
+                  open(SITEMAP_CACHE, "w", encoding="utf-8"), ensure_ascii=False, indent=1)
+        log(f"💾 Кэш карты сайта обновлён: {len(urls)} адресов")
     except Exception as e:
-        log(f"Playwright недоступен: {e}")
-        return False
+        log(f"⚠️ save_sitemap_cache: {e}")
 
-def pw_get_page(url):
-    if not _pw_context:
-        return None
+def get_site_map():
+    """v33: сайт → кэш ЛЮБОГО возраста → пропуск. Не пропускаем запуск, если кэш жив."""
+    urls = fetch_sitemap()
+    if urls:
+        save_sitemap_cache(urls)
+        log(f"✅ Карта сайта получена напрямую: {len(urls)} адресов")
+        return urls
     try:
-        page = _pw_context.new_page()
-        page.goto(url, timeout=30000, wait_until="networkidle")
-        content = page.content()
-        page.close()
-        log(f"Playwright GET {url} -> {len(content)} байт")
-        return content
-    except Exception as e:
-        log(f"Playwright ошибка: {url} -> {e}")
-        return None
-
-def pw_close():
-    global _pw_browser, _pw_context
-    try:
-        if _pw_browser:
-            _pw_browser.close()
+        cache = json.load(open(SITEMAP_CACHE, encoding="utf-8"))
+        if cache.get("urls"):
+            age = datetime.date.today().toordinal() - cache.get("updated", 0)
+            log(f"⚠️ Сайт из GitHub недоступен — беру кэш: {len(cache['urls'])} адресов, возраст {age} дн.")
+            return cache["urls"]
     except Exception:
         pass
+    log("❌ Сайт недоступен и кэш пуст — пропускаю запуск")
+    return []
 
 # ============================================================
-# GIGACHAT
+# ИСТОРИЯ ОТПРАВОК (JSON — не рвётся, как текстовик)
 # ============================================================
+
+def load_history():
+    try:
+        d = json.load(open(SENT_HISTORY, encoding="utf-8"))
+        return d.get("sent", {})
+    except Exception:
+        return {}
+
+def save_history(sent):
+    try:
+        json.dump({"sent": sent}, open(SENT_HISTORY, "w", encoding="utf-8"),
+                  ensure_ascii=False, indent=1)
+        log(f"💾 История отправок: {len(sent)} записей")
+    except Exception as e:
+        log(f"⚠️ save_history: {e}")
+
+SKIP_URL_PARTS = (".mp3", ".jpg", ".jpeg", ".png", ".xml", "/feed", "/wp-",
+                  "/tag/", "/tags/", "/category/", "/cgi-bin", ".ico", ".css", ".js")
+
+def pick_page(urls, sent):
+    fresh = [u for u in urls
+             if u not in sent
+             and not u.rstrip("/").endswith(SITE.rstrip("/").split("//")[-1])
+             and not any(p in u.lower() for p in SKIP_URL_PARTS)]
+    if not fresh:
+        log("ℹ️ Все подходящие страницы уже отправлены ранее")
+        return None
+    day = datetime.date.today().toordinal()
+    pick = sorted(fresh)[day % len(fresh)]
+    log(f" Выбрана страница дня: {pick} (новых кандидатов: {len(fresh)})")
+    return pick
+
+def fetch_page_text(url, limit=6000):
+    r = http_get(url)
+    if r is None or not r.ok:
+        return ""
+    t = re.sub(r"(?is)<(script|style|noscript|svg|head).*?>.*?</\1>", " ", r.text)
+    t = re.sub(r"(?s)<[^>]+>", " ", t)
+    t = html.unescape(t)
+    t = re.sub(r"\s+", " ", t).strip()
+    return t[:limit]
+
+# ============================================================
+# ИИ-ЦЕПОЧКА ТЕКСТА
+# ============================================================
+
+def _extract(r):
+    try: return r["choices"][0]["message"]["content"].strip()
+    except (KeyError, IndexError, TypeError): return None
+
 _GIGACHAT_TOKEN = None
 _GIGACHAT_TOKEN_EXPIRY = 0
 
 def get_gigachat_token():
     global _GIGACHAT_TOKEN, _GIGACHAT_TOKEN_EXPIRY
     if not GIGACHAT_CLIENT_ID or not GIGACHAT_CLIENT_SECRET:
-        log("GigaChat: ключи не заданы")
         return None
     if _GIGACHAT_TOKEN and time.time() < _GIGACHAT_TOKEN_EXPIRY:
         return _GIGACHAT_TOKEN
     try:
-        credentials = base64.b64encode(f"{GIGACHAT_CLIENT_ID}:{GIGACHAT_CLIENT_SECRET}".encode()).decode()
+        credentials = base64.b64encode(f"{GIGACHAT_CLIENT_ID}:{GIGACHAT_CLIENT_SECRET}".encode()).decode() if False else \
+            __import__("base64").b64encode(f"{GIGACHAT_CLIENT_ID}:{GIGACHAT_CLIENT_SECRET}".encode()).decode()
         r = requests.post("https://ngw.devices.sberbank.ru:9443/api/v2/oauth",
-            headers={"Authorization": f"Basic {credentials}", "RqUID": str(uuid.uuid4()), "Content-Type": "application/x-www-form-urlencoded"},
-            data={"scope": GIGACHAT_SCOPE}, timeout=30, verify=False)
-        log(f"GigaChat OAuth: статус {r.status_code}")
+            headers={"Authorization": f"Basic {credentials}",
+                     "RqUID": str(__import__("uuid").uuid4()),
+                     "Content-Type": "application/x-www-form-urlencoded"},
+            data={"scope": "GIGACHAT_API_PERS"}, timeout=30, verify=False)
+        log(f"ℹ️ GigaChat OAuth: статус {r.status_code}")
         if r.status_code != 200:
-            log(f"GigaChat OAuth тело: {r.text[:300]}")
             return None
         j = r.json()
         if "access_token" in j:
             _GIGACHAT_TOKEN = j["access_token"]
             _GIGACHAT_TOKEN_EXPIRY = time.time() + 1700
-            log("GigaChat: токен получен (30 мин)")
+            log("✅ GigaChat: токен получен (действует 30 мин)")
             return _GIGACHAT_TOKEN
     except Exception as e:
-        log(f"GigaChat auth error: {e}")
+        log(f"⚠️ GigaChat auth error: {e}")
     return None
 
-def gigachat_chat(prompt, model):
+def ai_gigachat(prompt):
     token = get_gigachat_token()
     if not token:
         return None
-    for attempt in range(2):
-        try:
-            r = requests.post("https://gigachat.devices.sberbank.ru/api/v1/chat/completions",
-                headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
-                json={"model": model, "temperature": 0.7, "max_tokens": 4000,
-                      "messages": [{"role": "user", "content": prompt + "\n\nВАЖНО: Пиши ТОЛЬКО на русском языке."}]},
-                timeout=120, verify=False)
-            if r.status_code != 200:
-                log(f"GigaChat chat [{model}]: статус {r.status_code}: {r.text[:200]}")
-                return None
-            res = r.json()["choices"][0]["message"]["content"].strip()
-            log(f"GigaChat [{model}]: ответ {len(res)} симв.")
+    try:
+        r = requests.post("https://gigachat.devices.sberbank.ru/api/v1/chat/completions",
+            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+            json={"model": "GigaChat:latest", "temperature": 0.9, "max_tokens": 4000,
+                  "messages": [{"role": "user", "content": prompt + RU}]},
+            timeout=120, verify=False)
+        if r.status_code != 200:
+            log(f"⚠️ GigaChat chat: статус {r.status_code}: {r.text[:200]}")
+            return None
+        return r.json()["choices"][0]["message"]["content"].strip()
+    except Exception as e:
+        log(f"⚠️ GigaChat error: {e}")
+        return None
+
+def ai_cerebras(prompt):
+    if not CEREBRAS_KEY: return None
+    try:
+        r = requests.post("https://api.cerebras.ai/v1/chat/completions",
+            headers={"Authorization": f"Bearer {CEREBRAS_KEY}"},
+            json={"model": "llama-3.3-70b", "temperature": 0.8,
+                  "messages": [{"role": "user", "content": prompt + RU}]}, timeout=60).json()
+        return None if "error" in r else _extract(r)
+    except Exception as e:
+        log(f"   ⚠️ cerebras: {str(e)[:80]}")
+        return None
+
+def ai_mistral(prompt):
+    if not MISTRAL_KEY: return None
+    try:
+        r = requests.post("https://api.mistral.ai/v1/chat/completions",
+            headers={"Authorization": f"Bearer {MISTRAL_KEY}"},
+            json={"model": "mistral-small-latest", "temperature": 0.8,
+                  "messages": [{"role": "user", "content": prompt + RU}]}, timeout=60).json()
+        return None if "error" in r else _extract(r)
+    except Exception as e:
+        log(f"   ⚠️ mistral: {str(e)[:80]}")
+        return None
+
+def ai_groq(prompt, key, model):
+    if not key: return None
+    try:
+        r = requests.post("https://api.groq.com/openai/v1/chat/completions",
+            headers={"Authorization": f"Bearer {key}"},
+            json={"model": model, "temperature": 0.8,
+                  "messages": [{"role": "user", "content": prompt + RU}]}, timeout=60).json()
+        return None if "error" in r else _extract(r)
+    except Exception as e:
+        log(f"   ⚠️ groq {model}: {str(e)[:80]}")
+        return None
+
+def ai_openrouter_auto(prompt, key, max_tokens):
+    if not key: return None
+    try:
+        r = requests.post("https://openrouter.ai/api/v1/chat/completions",
+            headers={"Authorization": f"Bearer {key}", "HTTP-Referer": "https://github.com"},
+            json={"model": "auto", "temperature": 0.8, "max_tokens": max_tokens,
+                  "messages": [{"role": "user", "content": prompt + RU}]}, timeout=60).json()
+        return None if "error" in r else _extract(r)
+    except Exception as e:
+        log(f"   ⚠️ openrouter auto: {str(e)[:80]}")
+        return None
+
+def ai_text(prompt, minlen=1500, rescue_min=1200):
+    best_res = ""
+
+    def take(res, label):
+        nonlocal best_res
+        if not res:
+            return None
+        if len(res) >= minlen:
+            log(f"✅ Успех: {label}, {len(res)} симв.")
             return res
-        except Exception as e:
-            log(f"GigaChat [{model}] попытка {attempt+1}: {str(e)[:150]}")
-            if attempt == 0:
-                log("Пауза 10 сек и повтор...")
-                time.sleep(10)
+        if len(res) > len(best_res):
+            best_res = res
+        return None
+
+    log("🔄 Попытка: gigachat (GigaChat:latest)...")
+    r = take(ai_gigachat(prompt), "gigachat")
+    if r: return r
+    log("🔄 Попытка: cerebras (llama-3.3-70b)...")
+    r = take(ai_cerebras(prompt), "cerebras")
+    if r: return r
+    log("🔄 Попытка: mistral (mistral-small)...")
+    r = take(ai_mistral(prompt), "mistral")
+    if r: return r
+    for i, key in enumerate((GROQ_KEY, GROQ_KEY2)):
+        if not key: continue
+        for model in GROQ_MODELS:
+            log(f"🔄 Попытка: groq ({model}, ключ {i+1})...")
+            r = take(ai_groq(prompt, key, model), f"groq ({model})")
+            if r: return r
+    for i, key in enumerate((OR_KEY, OR_KEY2)):
+        if not key: continue
+        for mt in (4000, 2000):
+            log(f"🔄 Попытка: openrouter auto (max={mt}, ключ {i+1})...")
+            r = take(ai_openrouter_auto(prompt, key, mt), f"openrouter (max={mt})")
+            if r: return r
+    if best_res and len(best_res) >= rescue_min:
+        log(f"ℹ️ Беру лучший кандидат ({len(best_res)} симв.)")
+        return best_res
     return None
 
-def ai_gigachat(prompt, minlen):
-    models = [GIGACHAT_MODEL, "GigaChat:latest"]
-    seen = set()
-    for mdl in models:
-        if not mdl or mdl in seen:
-            continue
-        seen.add(mdl)
-        log(f"Попытка: gigachat ({mdl})...")
-        res = gigachat_chat(prompt, mdl)
-        if res and len(res) >= minlen:
-            return res
-        if res:
-            log(f"GigaChat [{mdl}]: коротко ({len(res)} симв., нужно >={minlen})")
-    return None
+def extend_text(txt, target):
+    if not txt or len(txt) >= target:
+        return txt
+    ext = ai_gigachat(
+        f"Расширь текст до {target}-{target+400} символов, сохранив стиль, смысл и структуру. "
+        f"Добавь детали и конкретику. Без ссылок и Markdown.\n\nТЕКСТ:\n{txt}")
+    if ext and len(ext) >= target:
+        log(f"✅ Расширено: {len(ext)} симв.")
+        return ext
+    return txt
+
+def trim_text(t, limit):
+    if len(t) <= limit: return t
+    c = t[:limit]
+    i = max(c.rfind("."), c.rfind("!"), c.rfind("?"), c.rfind("\n"))
+    return (c[:i+1] if i > limit//2 else c).rstrip()
+
+def enforce_length(txt, lo=2000, hi=2500, target=2200):
+    if len(txt) < lo:
+        txt = extend_text(txt, target)
+    if len(txt) > hi:
+        txt = trim_text(txt, hi)
+    log(f"📏 Длина статьи: {len(txt)} симв. (коридор 2000-2500)")
+    return txt
 
 # ============================================================
-# САНИТИЗАЦИЯ И ОБРЕЗКА
+# АНТИ-НЕЙРОСЛОП
 # ============================================================
-def sanitize_ai_html(text):
-    t = text.replace("`html", "").replace("`", "")
-    t = re.sub(r"^#{1,2}\s*(.+)$", r"<h2>\1</h2>", t, flags=re.M)
-    t = re.sub(r"^#{3,6}\s*(.+)$", r"<h3>\1</h3>", t, flags=re.M)
-    t = re.sub(r"<(h[1-4])[^>]*>", r"<\1>", t, flags=re.I)
-    t = t.replace("**", "").replace("__", "")
-    t = EMOJI_RE.sub("", t)
-    parts = re.split(r"(<h[23]>.*?</h[23]>)", t, flags=re.S)
-    out = []
-    for p in parts:
-        p = p.strip()
-        if not p:
-            continue
-        if p.startswith("<h2>") or p.startswith("<h3>"):
-            out.append(p)
+
+SLOP_PATTERNS = [
+    (r"погружа\w+\s+в\s+(атмосфер\w*|мир\w*)", "клише «погружает в атмосферу/мир»", 2),
+    (r"не\s+остав\w+\s+равнодушн\w*", "клише «не оставит равнодушным»", 2),
+    (r"захват\w+\s+с\s+перв\w+\s+(страниц|секунд)", "клише «захватывает с первых страниц»", 2),
+    (r"заставля\w+\s+задум\w*", "клише «заставляет задуматься»", 2),
+    (r"судьб\w+\s+переплет\w*", "клише «судьбы переплетаются»", 2),
+    (r"мир[о,е]?\s+(полн\w+|полный)\s+\w+\s+и\s+\w+", "клише «мир, полный X и Y»", 2),
+    (r"настоящ\w+\s+подарок\s+для", "клише «настоящий подарок для»", 2),
+    (r"борьба\s+добра\s+и\s+зла|борьб\w+\s+света\s+и\s+тьмы", "штамп «борьба добра и зла»", 2),
+    (r"не\s+только\s+[^,]{3,60},\s+но\s+и", "конструкция «не только…, но и…»", 1),
+    (r"от\s+[а-яёa-z-]{4,20}\s+до\s+[а-яёa-z-]{4,20}", "абстрактная вилка «от… до…»", 1),
+    (r"[а-яё,)\s]+ — это\s+", "шаблон «X — это Y»", 1),
+    (r"^(однако|впрочем|между\s+тем|безусловно|действительно|более\s+того|тем\s+не\s+менее)\b",
+     "абзац с вводного слова", 1),
+    (r"(таким\s+образом|в\s+конечном\s+итоге|в\s+заключени[еи])\b", "итоговое резюме", 1),
+]
+
+def slop_check(txt):
+    flags = []
+    low = txt.lower()
+    n = max(len(txt), 1)
+    for pat, name, weight in SLOP_PATTERNS:
+        for m in re.finditer(pat, low):
+            flags.append({"name": name, "weight": weight,
+                          "quote": txt[m.start():m.start()+60].strip()})
+    sents = [s.strip() for s in re.split(r'[.!?]+\s', txt) if len(s.strip()) > 10]
+    if len(sents) >= 5:
+        lens = [len(s) for s in sents]
+        mean = sum(lens)/len(lens)
+        var = (sum((l-mean)**2 for l in lens)/len(lens)) ** 0.5
+        if mean > 0 and var/mean < 0.35:
+            flags.append({"name": "метроном: одинаковая длина предложений", "weight": 2,
+                          "quote": f"σ/μ={var/mean:.2f}"})
+    if txt.count(" — ") > n/700:
+        flags.append({"name": "плотность тире выше нормы", "weight": 1, "quote": "—"})
+    score = sum(f["weight"] for f in flags) * 1000.0 / n
+    return score, flags
+
+SLOP_FIX_PROMPT = (
+    "Перепиши текст ниже на русском, СОХРАНИВ смысл, структуру, факты и объём (±10%), "
+    "но убери маркеры машинного письма: {flags}. Запрещено: оценочные клише, "
+    "«не только…, но и…», вилки «от… до…», шаблон «X — это Y», вводные слова в начале абзацев, "
+    "итоговые резюме. Пиши неровно: чередуй короткие и длинные предложения, добавь конкретику "
+    "вместо оценок. Верни ТОЛЬКО очищенный текст.")
+
+def anti_slop(txt, label="статья", threshold=3.0):
+    score, flags = slop_check(txt)
+    log(f"🧼 slop-score {label}: {score:.1f}/1000 знаков, флагов: {len(flags)}")
+    for f in flags[:8]:
+        log(f"   • {f['name']}: «{f['quote']}»")
+    if score <= threshold or not flags:
+        return txt
+    fl = "; ".join(sorted({f['name'] for f in flags}))
+    fixed = ai_gigachat(SLOP_FIX_PROMPT.format(flags=fl))
+    if not fixed:
+        return txt
+    score2, flags2 = slop_check(fixed)
+    log(f"🧼 после fix-прохода: {score2:.1f}/1000 (было {score:.1f}), флагов: {len(flags2)}")
+    return fixed if score2 < score else txt
+
+# ============================================================
+# СТАТЬЯ
+# ============================================================
+
+def clean_txt(t):
+    return t.replace("**", "").replace("##", "").replace("#", "").strip()
+
+def build_article(page_url, page_text):
+    prompt = (f"Напиши статью для авторской рассылки по материалу страницы сайта Павла Гнесюка. "
+              f"Содержание страницы (фрагмент): {page_text[:4000]} "
+              f"Требования: 1. ТОЛЬКО русский язык. "
+              f"2. Заголовок до 110 символов, живой, БЕЗ слов-меток «Заголовок/Статья». "
+              f"3. Объём СТРОГО 2000-2500 символов, 5-7 абзацев: крючок-вступление, суть материала, "
+              f"детали и атмосфера, ключевой момент, финал с вопросом читателю. "
+              f"4. В ТЕЛЕ статьи НЕ должно быть URL, доменов и слов «ссылка», «перейти». "
+              f"5. НЕ используй Markdown. {ANTI_SLOP}")
+    txt = ai_text(prompt, minlen=1500, rescue_min=1200)
+    if not txt:
+        log("⚠️ Статья не создана — пропускаю отправку")
+        return None
+    txt = clean_txt(txt)
+    txt = anti_slop(txt)
+    txt = enforce_length(txt)
+    return txt
+
+# ============================================================
+# ПОЧТА
+# ============================================================
+
+def send_email(subject, body):
+    if not SMTP_HOST or not SMTP_LOGIN or not MAIL_TO:
+        log("⚠️ SMTP_HOST/SMTP_LOGIN/MAIL_TO не заданы — письмо не отправлено")
+        return False
+    try:
+        msg = EmailMessage()
+        msg["Subject"] = subject[:150]
+        msg["From"] = MAIL_FROM
+        msg["To"] = ", ".join(MAIL_TO)
+        msg.set_content(body)
+        if SMTP_PORT == 465:
+            server = smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, timeout=60)
         else:
-            p = re.sub(r"</?p[^>]*>", "\n", p)
-            for chunk in p.split("\n"):
-                chunk = " ".join(chunk.split())
-                if len(chunk) > 3:
-                    out.append(f"<p>{chunk}</p>")
-    if out and out[0].startswith("<h2>"):
-        low = out[0].lower()
-        if "статья" in low or "эксперт" in low or "обзор" in low:
-            out = out[1:]
-    return "\n".join(out)
-
-def trim_article(article, max_len=2600):
-    if len(article) <= max_len:
-        return article
-    sections = re.split(r"(?=<h2>)", article)
-    if len(sections) <= 2:
-        cut = article[:max_len]
-        i = cut.rfind("</p>")
-        return cut[:i+4] if i != -1 else cut
-    first, last = sections[0], sections[-1]
-    middle = sections[1:-1]
-    kept = [first]
-    total = len(first) + len(last)
-    for s in middle:
-        if total + len(s) > max_len:
-            break
-        kept.append(s)
-        total += len(s)
-    result = "".join(kept) + last
-    if len(result) > max_len:
-        cut = result[:max_len]
-        i = cut.rfind("</p>")
-        if i != -1:
-            result = cut[:i+4]
-    log(f"Статья обрезана по секциям: {len(article)} -> {len(result)} симв.")
-    return result
-
-def clean_plain(s):
-    s = re.sub(r"<[^>]+>", "", s)
-    s = s.replace("**", "").replace("##", "")
-    s = EMOJI_RE.sub("", s)
-    return re.sub(r"\s+", " ", s).strip()
+            server = smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=60)
+            server.starttls()
+        server.login(SMTP_LOGIN, SMTP_PASSWORD)
+        server.send_message(msg)
+        server.quit()
+        log(f"✅ Письмо отправлено: {len(MAIL_TO)} получателям, тема: {subject[:80]}")
+        return True
+    except Exception as e:
+        log(f"❌ Ошибка отправки письма: {str(e)[:150]}")
+        return False
 
 # ============================================================
-# ПАРСИНГ СТРАНИЦЫ
+# ГЛАВНАЯ ЛОГИКА
 # ============================================================
-def clean(s):
-    for _ in range(3):
-        s = html.unescape(s)
-        s = re.sub(r"<[^>]+>", " ", s)
-    for pattern in JUNK_PATTERNS:
-        s = re.sub(pattern, "", s, flags=re.IGNORECASE)
-    return re.sub(r"\s+", " ", s).strip()
 
-def is_pavrus_brand(u):
-    path = u.split("//", 1)[-1].split("/", 1)[-1].lower()
-    return BRAND_SLUG in path
+def main():
+    urls = get_site_map()
+    if not urls:
+        return
 
-def parse_page(html_text):
-    h1 = ""
-    m = re.search(r"<h1[^>]*>(.*?)</h1>", html_text, re.S | re.I)
-    if m:
-        h1 = clean(m.group(1))
-    desc = ""
-    dm = re.search(r'<meta[^>]+name=["\']description["\'][^>]+content=["\'](.*?)["\']', html_text, re.S | re.I)
-    if dm:
-        desc = clean(dm.group(1))
-    tail = re.sub(r"<script[^>]*>.*?</script>", "", html_text, flags=re.S | re.I)
-    tail = re.sub(r"<style[^>]*>.*?</style>", "", tail, flags=re.S | re.I)
-    tail = re.sub(r"<nav[^>]*>.*?</nav>", "", tail, flags=re.S | re.I)
-    tail = re.sub(r"<header[^>]*>.*?</header>", "", tail, flags=re.S | re.I)
-    tail = re.sub(r"<footer[^>]*>.*?</footer>", "", tail, flags=re.S | re.I)
-    desc_block = ""
-    for cls in ["description", "descr", "detail", "product-description", "tab-content"]:
-        m = re.search(rf'<div[^>]+class=["\'][^"\']*{cls}[^"\']*["\'][^>]*>(.*?)</div>', tail, re.S | re.I)
-        if m:
-            desc_block = m.group(1)
-            break
-    if not desc_block:
-        desc_block = " ".join(re.findall(r"<p[^>]*>(.*?)</p>", tail, re.S | re.I))
-    raw = clean(desc_block)
-    keep = [s.strip() for s in raw.split(". ")
-            if len(s.strip()) > 20 and "{" not in s
-            and not any(j in s.lower() for j in ["корзин", "кабинет", "войти", "каталог", "контакты"])]
-    return h1, desc, ". ".join(keep)[:1500]
+    sent = load_history()
+    page = pick_page(urls, sent)
+    if not page:
+        log("ℹ️ Новых страниц нет — письмо сегодня не отправляем")
+        return
 
-def pick_page(urls, hist):
-    avail = [u for u in urls if u not in hist] or urls
-    random.shuffle(avail)
+    page_text = fetch_page_text(page)
+    if not page_text:
+        log("⚠️ Не удалось получить текст страницы — пропускаю запуск")
+        return
+    log(f"📄 Текст страницы: {len(page_text)} симв.")
 
-    for attempt, page in enumerate(avail[:12]):
-        html_text = pw_get_page(page)
-        if not html_text or len(html_text) < 3000:
-            log(f"Попытка {attempt+1}: мало данных — {page}")
-            continue
-        if "beget=begetok" in html_text:
-            log(f"Попытка {attempt+1}: заглушка Beget — {page}")
-            continue
+    article = build_article(page, page_text)
+    if not article:
+        return
 
-        h1, desc, body = parse_page(html_text)
-        if not h1 or (len(body) + len(desc)) < 50:
-            log(f"Попытка {attempt+1}: мало текста — {page}")
-            continue
+    headline = article.split("\n")[0].strip()
+    # v33: ссылка на сайт — ТОЛЬКО в подвале письма (тело статьи чистое)
+    body = (article +
+            f"\n\n---\nПолный материал на сайте: {page}\nПавел Гнесюк — музыка и книги.")
 
-        log(f"Товар PAVRUS: {h1[:70]} — {page}")
-        return page, h1, desc, body
+    ok = send_email(headline, body)
+    if ok:
+        sent[page] = str(datetime.date.today())
+        save_history(sent)
 
-    return None, "", "", ""
+    log("=" * 50)
+    log(f"✅ FINISH: статья {len(article)} симв. → почта: {'ДА' if ok else 'НЕТ'}")
+    log("=" * 50)
 
-# ============================================================
-# ЗАГОЛОВКИ + ПОДЗАГОЛОВКИ
-# ============================================================
-def generate_headings_and_titles(title, desc, seeds):
-    fallback = {
-        "article_title": f"{title}: устройство, возможности и сценарии применения решения PAVRUS",
-        "news_title": f"{title}: что интересного в этом решении PAVRUS",
-        "what_is": seeds["what_is"], "purpose": seeds["purpose"],
-        "features": seeds["features"], "advantages": seeds["advantages"],
-        "usage": seeds["usage"], "conclusion": seeds["conclusion"],
-    }
-
-    prompt = (
-        f"Ты — эксперт по профессиональному AV-оборудованию PAVRUS.\n"
-        f"Придумай для статьи о товаре:\n"
-        f"1. Заголовок статьи (8-14 слов)\n"
-        f"2. Заголовок новости (6-10 слов)\n"
-        f"3-8. Шесть подзаголовков разделов (5-10 слов каждый) на основе затравок.\n\n"
-        f"ТОВАР: {title}\nОПИСАНИЕ: {desc}\n\n"
-        f"ЗАТРАВКИ:\n1. {seeds['what_is']}\n2. {seeds['purpose']}\n3. {seeds['features']}\n"
-        f"4. {seeds['advantages']}\n5. {seeds['usage']}\n6. {seeds['conclusion']}\n\n"
-        f"КРИТИЧЕСКИ ВАЖНО: Ответь СТРОГО 8 строками текста. БЕЗ markdown, БЕЗ символов #, *, БЕЗ нумерации (1., 2.), БЕЗ вводных слов типа 'Вот заголовки'. Просто 8 строк текста."
-    )
-
-    result = gigachat_chat(prompt, GIGACHAT_MODEL or "GigaChat:latest")
-    if not result:
-        log("Заголовки не сгенерированы — использую запасные")
-        return fallback
-
-    lines = []
-    for l in result.split("\n"):
-        l = clean_plain(l).strip()
-        if not l or l.startswith(("#
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception as e:
+        log(f"❌ КРИТИЧЕСКАЯ ОШИБКА: {e}")
+        raise
