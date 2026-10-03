@@ -56,7 +56,7 @@ def clean_slop(text):
 def log(msg):
     print(msg, flush=True)
 
-log("pavrus-vk-agent v54 (загрузка фото ЧЕРЕЗ АЛЬБОМ групповым токеном — не зависит от IP; user-токен как резерв; STRICT_IMAGE)")
+log("pavrus-vk-agent v55 (альбомная загрузка групповым токеном; корректная чистка текста; запасной текст при вырождении; STRICT_IMAGE)")
 
 # ============================================================
 # PLAYWRIGHT
@@ -338,7 +338,6 @@ def vk_upload_album(img_bytes):
     att = _album_upload_once(img_bytes, VK_ALBUM_ID)
     if att:
         return att
-    # Альбом переполнен/недоступен — создаём новый один раз
     log("⚠️ albums: пробую создать новый альбом (старый переполнен или недоступен)")
     created = vk_call("photos.createAlbum",
                       {"group_id": VK_GROUP_ID, "title": f"Посты {datetime.date.today().year}",
@@ -351,7 +350,7 @@ def vk_upload_album(img_bytes):
         return _album_upload_once(img_bytes, new_id)
     return None
 
-# ---------- резерв: wall-загрузка user-токеном (работает только с «родного» IP) ----------
+# ---------- резерв: wall-загрузка user-токеном ----------
 def vk_upload_wall(img_bytes):
     if not VK_USER_TOKEN:
         return None
@@ -383,7 +382,7 @@ def vk_upload_wall(img_bytes):
     return None
 
 def vk_upload(img_bytes):
-    """v54: порядок — альбом (групповой токен, не зависит от IP) → wall (user) → None."""
+    """v55: альбом (групповой токен) → wall (user-токен) → None."""
     if not img_bytes:
         log("Нет данных картинки для загрузки!")
         return None
@@ -446,7 +445,7 @@ def tg_post(img_bytes, caption):
         log(f"TG error: {r}")
 
 # ============================================================
-# ГЛАВНАЯ ЛОГИКА v54
+# ГЛАВНАЯ ЛОГИКА v55
 # ============================================================
 def main():
     vk_health()
@@ -530,23 +529,31 @@ def main():
         text = f"Современное оборудование для конференц-залов и масштабных мероприятий.\n\n{desc}\n\nНапишите нам в сообщения группы — расскажем подробнее!"
     text = clean_slop(text)
     text = text.replace("**", "").replace("##", "").strip()
-    text = re.sub(r"^#.*\n", "", text, flags=re.M)
+    # v55: УДАЛЕНА опасная строка re.sub(r"^#.*\n", ...), которая съедала весь текст
     text = re.sub(r"https?://\S+", "", text)
     text = re.sub(r"pavrus\.ru\S*", "", text, flags=re.I)
     text = re.sub(r"Подробнее:\s*", "", text, flags=re.I)
     lines = text.split('\n')
     cleaned = []
     for line in lines:
-        line = line.strip()
-        if not line or line.startswith('#'):
+        # v55: срезаем решётки, но СОХРАНЯЕМ строку
+        line = line.strip().lstrip('#').strip()
+        if not line:
             continue
         if len(cleaned) == 0 and title.lower() in line.lower() and len(line) < len(title) + 30:
             continue
         cleaned.append(line)
     text = '\n'.join(cleaned).strip()
+    # v55: защита от выродившегося текста
+    if len(text) < 300:
+        log(f"⚠️ Текст после чистки выродился ({len(text)} симв.) — собираю запасной из описания")
+        text = (f"{desc}\n\n"
+                f"Сценарии применения: конференц-залы, презентации, выездные мероприятия. "
+                f"Оборудование PAVRUS выбирают за стабильность связи и простую интеграцию "
+                f"в существующую инфраструктуру.")
     if "Напишите нам" not in text:
         text += "\n\nНапишите нам в сообщения группы — расскажем подробнее!"
-    # v54: финальная обрезка ПОСЛЕ добавления призыва — гарантируем <=1000
+    # v55: финальная обрезка ПОСЛЕ добавления призыва
     if len(text) > 1000:
         cut_pos = text.rfind('.', 0, 940)
         if cut_pos > 750:
