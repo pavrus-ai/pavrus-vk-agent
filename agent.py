@@ -8,26 +8,22 @@ urllib3.disable_warnings()
 # ============================================================
 VK_TOKEN = os.environ.get("VK_TOKEN", "").strip()
 VK_USER_TOKEN = os.environ.get("VK_USER_TOKEN", "").strip()
+VK_SERVICE_TOKEN = os.environ.get("VK_SERVICE_TOKEN", "").strip()   # v58: сервисный ключ (если есть готовый)
+VK_APP_ID = os.environ.get("VK_APP_ID", "").strip()                 # v58: или пара app_id+secret
+VK_APP_SECRET = os.environ.get("VK_APP_SECRET", "").strip()         #     для client_credentials
 VK_GROUP_ID = os.environ.get("VK_GROUP_ID", "").strip().lstrip("-")
 VK_ALBUM_ID = os.environ.get("VK_ALBUM_ID", "").strip()
 TG_BOT = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
 TG_CHAT = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
-GROQ_KEY = os.environ.get("GROQ_KEY", "").strip()
-GROQ_KEY2 = os.environ.get("GROQ_KEY2", "").strip()
-OR_KEY = os.environ.get("OPENROUTER_KEY", "").strip()
-OR_KEY2 = os.environ.get("OPENROUTER_KEY2", "").strip()
-CEREBRAS_KEY = os.environ.get("CEREBRAS_KEY", "").strip()
-MISTRAL_KEY = os.environ.get("MISTRAL_KEY", "").strip()
-OPENAI_KEY = os.environ.get("OPENAI_KEY", "").strip()
-HF_TOKEN = os.environ.get("HF_TOKEN", "").strip()
 GIGACHAT_CLIENT_ID = os.environ.get("GIGACHAT_CLIENT_ID1", "").strip()
 GIGACHAT_CLIENT_SECRET = os.environ.get("GIGACHAT_CLIENT_SECRET1", "").strip()
 
 SITE = "https://pavrus.ru"
 HISTORY = "history_vk.json"
 CACHE = "sitemap_cache.json"
-API = "https://api.vk.com/method/"
-VK_V = "5.199"  # v57: обновлена до версии из документации
+API_NEW = "https://api.vk.ru/method/"    # v58: новый хост + Bearer (по документации)
+API_OLD = "https://api.vk.com/method/"   # резерв
+VK_V = "5.199"
 STRICT_IMAGE = os.environ.get("STRICT_IMAGE", "1").strip() != "0"
 
 BRAND_SLUGS = ["pavrus", "htdz", "ht-dz", "chartu", "restmoment", "rest-moment"]
@@ -56,7 +52,7 @@ def clean_slop(text):
 def log(msg):
     print(msg, flush=True)
 
-log("pavrus-vk-agent v57 (v=5.199; photos.getUploadServer с file1; photos.save с photos_list; health-check нового метода)")
+log("pavrus-vk-agent v58 (матрица проб методов загрузки; сервисный ключ; Bearer api.vk.ru; цепочка album->wall->messages->docs)")
 
 # ============================================================
 # PLAYWRIGHT
@@ -248,148 +244,242 @@ def ai_call(prompt, minlen=700):
     return None
 
 # ============================================================
-# ВК: v57 по документации (v=5.199, file1, photos_list)
+# ВК: v58 — Bearer на api.vk.ru, сервисный ключ, матрица проб
 # ============================================================
+_SERVICE_TOKEN_CACHE = None
+
+def get_service_token():
+    """v58: сервисный ключ — готовый из секрета или через client_credentials."""
+    global _SERVICE_TOKEN_CACHE
+    if VK_SERVICE_TOKEN:
+        return VK_SERVICE_TOKEN
+    if _SERVICE_TOKEN_CACHE:
+        return _SERVICE_TOKEN_CACHE
+    if VK_APP_ID and VK_APP_SECRET:
+        try:
+            r = requests.get("https://oauth.vk.com/token",
+                             params={"grant_type": "client_credentials",
+                                     "client_id": VK_APP_ID,
+                                     "client_secret": VK_APP_SECRET,
+                                     "v": "5.131"}, timeout=30).json()
+            tok = r.get("access_token")
+            if tok:
+                log("✅ Сервисный ключ получен через client_credentials")
+                _SERVICE_TOKEN_CACHE = tok
+                return tok
+            log(f"⚠️ Сервисный ключ не выдан: {str(r)[:120]}")
+        except Exception as e:
+            log(f"⚠️ Сервисный ключ ошибка: {str(e)[:80]}")
+    return None
+
+def _vk_once(base, method, p, token, bearer):
+    headers = {"Authorization": f"Bearer {token}"} if bearer else {}
+    data = dict(p)
+    if not bearer:
+        data["access_token"] = token
+    return requests.post(base + method, data=data, headers=headers, timeout=30).json()
+
 def vk_call(method, params, token, retries=5):
     p = dict(params or {})
-    p["access_token"] = token
     p["v"] = VK_V
     for attempt in range(retries):
         try:
-            r = requests.post(API + method, data=p, timeout=30).json()
-            if "error" in r:
-                err = r["error"]
-                if err.get("error_code") == 9:
-                    delay = 10 * (attempt + 1)
-                    log(f"VK Flood control. Ждем {delay} сек (попытка {attempt+1}/{retries})...")
-                    time.sleep(delay)
-                    continue
-                log(f"VK {method} error: {err}")
+            r = _vk_once(API_NEW, method, p, token, bearer=True)
+            if "error" not in r:
+                return r.get("response")
+            err = r["error"]
+            code = err.get("error_code")
+            if code == 9:
+                delay = 10 * (attempt + 1)
+                log(f"VK Flood control. Ждем {delay} сек (попытка {attempt+1}/{retries})...")
+                time.sleep(delay)
+                continue
+            if code in (5, 27):
+                r2 = _vk_once(API_OLD, method, p, token, bearer=False)
+                if "error" not in r2:
+                    log(f"ℹ️ {method}: сработал резервный хост vk.com")
+                    return r2.get("response")
+                log(f"VK {method} error (vk.ru, Bearer): {err}")
                 return None
-            return r.get("response")
+            log(f"VK {method} error: {err}")
+            return None
         except Exception as e:
             log(f"VK {method} exception: {e}")
             time.sleep(5)
     log(f"VK {method}: все {retries} попыток исчерпаны")
     return None
 
+def vk_probe(method, params, token):
+    """v58: тихая проба для матрицы прав (без шума в логе)."""
+    p = dict(params or {})
+    p["v"] = VK_V
+    try:
+        r = _vk_once(API_NEW, method, p, token, bearer=True)
+        if "error" not in r:
+            return True, None
+        return False, r["error"].get("error_code")
+    except Exception as e:
+        return False, str(e)[:40]
+
+def token_pool():
+    """v58: все доступные токены в порядке приоритета."""
+    pool = []
+    if VK_TOKEN:
+        pool.append(("group", VK_TOKEN))
+    st = get_service_token()
+    if st:
+        pool.append(("service", st))
+    if VK_USER_TOKEN:
+        pool.append(("user", VK_USER_TOKEN))
+    return pool
+
+def vk_probes():
+    """v58: матрица проб — какие методы загрузки живы на каком токене."""
+    methods = [
+        ("photos.getWallUploadServer", {"group_id": VK_GROUP_ID}),
+        ("photos.getUploadServer", {"album_id": VK_ALBUM_ID, "group_id": VK_GROUP_ID} if VK_ALBUM_ID else None),
+        ("photos.getOwnerPhotoUploadServer", {"owner_id": "-" + VK_GROUP_ID}),
+        ("photos.getMessagesUploadServer", {"group_id": VK_GROUP_ID}),
+        ("photos.getMarketUploadServer", {"group_id": VK_GROUP_ID}),
+        ("docs.getUploadServer", {"group_id": VK_GROUP_ID}),
+    ]
+    log("🔬 Матрица проб (api.vk.ru, Bearer): метод [токен] → результат")
+    for mname, params in methods:
+        if params is None:
+            log(f"   • {mname}: пропуск (нет album_id)")
+            continue
+        for tname, tok in token_pool():
+            ok, err = vk_probe(mname, params, tok)
+            log(f"   • {mname} [{tname}]: {'OK, upload_url есть' if ok else f'error {err}'}")
+
 def vk_health():
     if VK_TOKEN:
         r = vk_call("groups.getById", {"group_id": VK_GROUP_ID}, VK_TOKEN, retries=1)
         log(f"🩺 VK_TOKEN (группа): {'ОК' if r else 'ОШИБКА'}")
-        # v57: health-check именно того метода, который будем использовать
-        if VK_ALBUM_ID:
-            probe = vk_call("photos.getUploadServer",
-                           {"album_id": VK_ALBUM_ID, "group_id": VK_GROUP_ID},
-                           VK_TOKEN, retries=1)
-            if probe and "upload_url" in probe:
-                log("🩺 photos.getUploadServer (альбом): РАБОТАЕТ")
-            else:
-                log("🩺 photos.getUploadServer (альбом): НЕ РАБОТАЕТ — проверьте права токена «Фотографии»")
-        else:
-            log("⚠️ VK_ALBUM_ID не задан")
     else:
         log("⚠️ VK_TOKEN не задан")
+    st = get_service_token()
+    log(f"🩺 Сервисный ключ: {'есть' if st else 'нет (VK_SERVICE_TOKEN / VK_APP_ID+SECRET не заданы)'}")
     if VK_USER_TOKEN:
         r = vk_call("users.get", {}, VK_USER_TOKEN, retries=1)
         log(f"🩺 VK_USER_TOKEN (юзер): {'ОК' if r else 'НЕ РАБОТАЕТ с этого IP (5/1130)'}")
+    log(f"🩺 VK_ALBUM_ID: {VK_ALBUM_ID if VK_ALBUM_ID else 'не задан'}")
+    vk_probes()
 
-# ---------- v57: загрузка по документации (file1, photos_list) ----------
-def vk_upload_album_doc(img_bytes):
-    """v57: по документации VK — photos.getUploadServer -> file1 -> photos.save."""
-    if not (VK_TOKEN and VK_GROUP_ID and VK_ALBUM_ID):
+# ---------- пути загрузки (v58: четыре пути, первый живой побеждает) ----------
+def _upload_album(img_bytes, token, tname):
+    if not VK_ALBUM_ID:
         return None
-    log(f"v57: загрузка по документации (album_id={VK_ALBUM_ID}, group_id={VK_GROUP_ID})")
-    
-    # Шаг 1: получить upload_url
     srv = vk_call("photos.getUploadServer",
-                  {"album_id": VK_ALBUM_ID, "group_id": VK_GROUP_ID},
-                  VK_TOKEN, retries=3)
+                  {"album_id": VK_ALBUM_ID, "group_id": VK_GROUP_ID}, token, retries=2)
     if not srv or "upload_url" not in srv:
-        log(f"⚠️ Шаг 1 не дал upload_url: {srv}")
         return None
-    upload_url = srv["upload_url"]
-    log(f"✅ Шаг 1: upload_url получен")
-    
-    # Шаг 2: загрузить файл через file1
-    for attempt in range(3):
+    log(f"✅ [{tname}] шаг 1: upload_url альбома получен")
+    r_json = None
+    for field in ("file1", "file"):
         try:
-            r = requests.post(upload_url,
-                             files={"file1": ("product.jpg", img_bytes, "image/jpeg")},
-                             timeout=120)
+            r = requests.post(srv["upload_url"],
+                              files={field: ("product.jpg", img_bytes, "image/jpeg")}, timeout=120)
             r_json = r.json()
-            if not r_json.get("photos_list"):
-                log(f"⚠️ Шаг 2: пустой photos_list (попытка {attempt+1}): {str(r_json)[:150]}")
-                time.sleep(5 * (attempt + 1))
-                continue
-            log(f"✅ Шаг 2: файл загружен, photos_list получен")
-            break
+            if r_json.get("photos_list"):
+                break
         except Exception as e:
-            log(f"⚠️ Шаг 2 ошибка (попытка {attempt+1}): {e}")
-            time.sleep(5 * (attempt + 1))
-    else:
+            log(f"⚠️ [{tname}] шаг 2 ошибка ({field}): {e}")
+    if not r_json or not r_json.get("photos_list"):
         return None
-    
-    # Шаг 3: сохранить через photos.save
-    # ВАЖНО: photos_list передаём как JSON-строку (как есть из ответа)
+    log(f"✅ [{tname}] шаг 2: файл загружен, photos_list получен")
     saved = vk_call("photos.save",
-                   {"album_id": VK_ALBUM_ID,
-                    "server": r_json.get("server", ""),
-                    "photos_list": r_json.get("photos_list", ""),  # JSON-строка
-                    "hash": r_json.get("hash", ""),
-                    "group_id": VK_GROUP_ID},
-                   VK_TOKEN, retries=3)
+                    {"album_id": VK_ALBUM_ID, "group_id": VK_GROUP_ID,
+                     "server": r_json.get("server", ""),
+                     "photos_list": r_json.get("photos_list", ""),
+                     "hash": r_json.get("hash", "")}, token, retries=2)
     if not saved:
-        log("⚠️ Шаг 3: photos.save вернул None")
         return None
-    
     p = saved[0]
     pid, owner = p.get("id"), p.get("owner_id")
     ak = p.get("access_key")
     if not ak:
-        # Получаем access_key через photos.get
-        g = vk_call("photos.get", {"owner_id": owner, "photo_ids": str(pid)}, VK_TOKEN, retries=2)
+        g = vk_call("photos.get", {"owner_id": owner, "photo_ids": str(pid)}, token, retries=2)
         if g:
             ak = (g[0] or {}).get("access_key")
     att = f"photo{owner}_{pid}" + (f"_{ak}" if ak else "")
-    log(f"✅ Шаг 3: фото сохранено в альбом {VK_ALBUM_ID}: {att}")
+    log(f"✅ [{tname}] шаг 3: фото в альбоме {VK_ALBUM_ID}: {att}")
     return att
 
-# ---------- резерв: wall-загрузка user-токеном ----------
-def vk_upload_wall(img_bytes):
-    if not VK_USER_TOKEN:
-        return None
-    srv = vk_call("photos.getWallUploadServer", {"group_id": VK_GROUP_ID}, VK_USER_TOKEN, retries=2)
+def _upload_wall(img_bytes, token, tname):
+    srv = vk_call("photos.getWallUploadServer", {"group_id": VK_GROUP_ID}, token, retries=2)
     if not srv or "upload_url" not in srv:
         return None
     for attempt in range(2):
         try:
             r = requests.post(srv["upload_url"],
-                             files={"photo": ("product.jpg", img_bytes, "image/jpeg")}, timeout=120)
+                              files={"photo": ("product.jpg", img_bytes, "image/jpeg")}, timeout=120)
             r_json = r.json()
             if not r_json.get("photo"):
                 time.sleep(5)
                 continue
             saved = vk_call("photos.saveWallPhoto",
-                           {"group_id": VK_GROUP_ID,
-                            "photo": r_json["photo"],
-                            "server": r_json.get("server", ""),
-                            "hash": r_json.get("hash", "")},
-                           VK_USER_TOKEN, retries=2)
+                            {"group_id": VK_GROUP_ID, "photo": r_json["photo"],
+                             "server": r_json.get("server", ""), "hash": r_json.get("hash", "")},
+                            token, retries=2)
             if saved:
                 p = saved[0]
                 att = f"photo{p['owner_id']}_{p['id']}"
                 if p.get("access_key"):
                     att += f"_{p['access_key']}"
-                log(f"✅ Фото загружено через user-токен (wall): {att}")
+                log(f"✅ [{tname}] фото на стене: {att}")
                 return att
         except Exception as e:
-            log(f"⚠️ wall: ошибка (попытка {attempt+1}): {e}")
+            log(f"⚠️ [{tname}] wall ошибка (попытка {attempt+1}): {e}")
             time.sleep(5)
     return None
 
+def _upload_messages(img_bytes, token, tname):
+    srv = vk_call("photos.getMessagesUploadServer", {"group_id": VK_GROUP_ID}, token, retries=2)
+    if not srv or "upload_url" not in srv:
+        return None
+    try:
+        r = requests.post(srv["upload_url"],
+                          files={"photo": ("product.jpg", img_bytes, "image/jpeg")}, timeout=120)
+        r_json = r.json()
+        if not r_json.get("photo"):
+            return None
+        saved = vk_call("photos.saveMessagesPhoto",
+                        {"photo": r_json["photo"], "server": r_json.get("server", ""),
+                         "hash": r_json.get("hash", "")}, token, retries=2)
+        if saved:
+            p = saved[0]
+            att = f"photo{p['owner_id']}_{p['id']}"
+            if p.get("access_key"):
+                att += f"_{p['access_key']}"
+            log(f"✅ [{tname}] фото через messages-путь: {att}")
+            return att
+    except Exception as e:
+        log(f"⚠️ [{tname}] messages ошибка: {e}")
+    return None
+
+def _upload_docs(img_bytes, token, tname):
+    srv = vk_call("docs.getUploadServer", {"group_id": VK_GROUP_ID}, token, retries=2)
+    if not srv or "upload_url" not in srv:
+        return None
+    try:
+        r = requests.post(srv["upload_url"],
+                          files={"file": ("product.jpg", img_bytes, "image/jpeg")}, timeout=120)
+        r_json = r.json()
+        if not r_json.get("file"):
+            return None
+        saved = vk_call("docs.save", {"file": r_json["file"], "title": "product.jpg"}, token, retries=2)
+        if saved:
+            d = saved[0] if isinstance(saved, list) else saved
+            att = f"doc{d['owner_id']}_{d['id']}"
+            log(f"✅ [{tname}] фото через docs-путь: {att}")
+            return att
+    except Exception as e:
+        log(f"⚠️ [{tname}] docs ошибка: {e}")
+    return None
+
 def vk_upload(img_bytes):
-    """v57: альбом по документации -> wall (user) -> None."""
+    """v58: для каждого токена (group -> service -> user) пробуем 4 пути загрузки."""
     if not img_bytes:
         log("Нет данных картинки для загрузки!")
         return None
@@ -405,11 +495,14 @@ def vk_upload(img_bytes):
             log("Конвертировано в RGB/JPEG")
     except Exception as e:
         log(f"Ошибка проверки картинки: {e}")
-    
-    att = vk_upload_album_doc(img_bytes)
-    if att:
-        return att
-    return vk_upload_wall(img_bytes)
+    for tname, tok in token_pool():
+        for path_name, path_fn in (("album", _upload_album), ("wall", _upload_wall),
+                                   ("messages", _upload_messages), ("docs", _upload_docs)):
+            att = path_fn(img_bytes, tok, tname)
+            if att:
+                return att
+        log(f"⚠️ [{tname}]: ни один из 4 путей не сработал")
+    return None
 
 def vk_post(message, att):
     log(f"Публикация в ВК: {len(message)} симв., attachment: {att}")
@@ -453,7 +546,7 @@ def tg_post(img_bytes, caption):
         log(f"TG error: {r}")
 
 # ============================================================
-# ГЛАВНАЯ ЛОГИКА v57
+# ГЛАВНАЯ ЛОГИКА v58
 # ============================================================
 def main():
     vk_health()
