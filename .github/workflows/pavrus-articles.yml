@@ -1,38 +1,64 @@
-runs-on: ubuntu-latest
-timeout-minutes: 20
+name: Pavrus Articles Agent
 
-steps:
-  - name: Checkout repo
-    uses: actions/checkout@v4
+on:
+  schedule:
+    - cron: "0 8 * * *"   # каждый день в 08:00 UTC (11:00 МСК)
+  workflow_dispatch:      # ручной запуск по кнопке
 
-  - name: Setup Python
-    uses: actions/setup-python@v5
-    with:
-      python-version: '3.11'
+permissions:
+  contents: write         # нужен, чтобы коммитить sitemap_cache.json и sent_history.json
 
-  - name: Install dependencies
-    run: |
-      pip install -r requirements.txt
-      playwright install chromium
-      playwright install-deps chromium
+jobs:
+  run-agent:
+    name: Generate & Send Article
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
 
-  - name: Run articles agent
-    env:
-      GIGACHAT_CLIENT_ID: ${{ secrets.GIGACHAT_CLIENT_ID }}
-      GIGACHAT_CLIENT_ID1: ${{ secrets.GIGACHAT_CLIENT_ID1 }}
-      GIGACHAT_CLIENT_SECRET: ${{ secrets.GIGACHAT_CLIENT_SECRET }}
-      GIGACHAT_CLIENT_SECRET1: ${{ secrets.GIGACHAT_CLIENT_SECRET1 }}
-      GIGACHAT_SCOPE: ${{ secrets.GIGACHAT_SCOPE }}
-      GIGACHAT_MODEL: ${{ secrets.GIGACHAT_MODEL }}
-      CEREBRAS_KEY: ${{ secrets.CEREBRAS_KEY }}
-      MISTRAL_KEY: ${{ secrets.MISTRAL_KEY }}
-      GROQ_KEY: ${{ secrets.GROQ_KEY }}
-      GROQ_KEY2: ${{ secrets.GROQ_KEY2 }}
-      OPENROUTER_KEY: ${{ secrets.OPENROUTER_KEY }}
-      OPENROUTER_KEY2: ${{ secrets.OPENROUTER_KEY2 }}
-      SMTP_HOST: ${{ secrets.SMTP_HOST }}
-      SMTP_PORT: ${{ secrets.SMTP_PORT }}
-      SMTP_USER: ${{ secrets.SMTP_USER }}
-      SMTP_PASS: ${{ secrets.SMTP_PASS }}
-      EMAIL_TO: ${{ secrets.EMAIL_TO }}
-    run: python pavrus-articles-agent.py
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          pip install requests Pillow curl-cffi playwright python-docx
+          playwright install chromium
+          playwright install-deps chromium
+
+      - name: Run pavrus-articles-agent
+        env:
+          GIGACHAT_CLIENT_ID: ${{ secrets.GIGACHAT_CLIENT_ID }}
+          GIGACHAT_CLIENT_ID1: ${{ secrets.GIGACHAT_CLIENT_ID1 }}
+          GIGACHAT_CLIENT_SECRET: ${{ secrets.GIGACHAT_CLIENT_SECRET }}
+          GIGACHAT_CLIENT_SECRET1: ${{ secrets.GIGACHAT_CLIENT_SECRET1 }}
+          GIGACHAT_SCOPE: ${{ secrets.GIGACHAT_SCOPE }}
+          GIGACHAT_MODEL: ${{ secrets.GIGACHAT_MODEL }}
+          CEREBRAS_KEY: ${{ secrets.CEREBRAS_KEY }}
+          MISTRAL_KEY: ${{ secrets.MISTRAL_KEY }}
+          GROQ_KEY: ${{ secrets.GROQ_KEY }}
+          GROQ_KEY2: ${{ secrets.GROQ_KEY2 }}
+          OPENROUTER_KEY: ${{ secrets.OPENROUTER_KEY }}
+          OPENROUTER_KEY2: ${{ secrets.OPENROUTER_KEY2 }}
+          SMTP_HOST: ${{ secrets.SMTP_HOST }}
+          SMTP_PORT: ${{ secrets.SMTP_PORT }}
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_LOGIN: ${{ secrets.SMTP_LOGIN }}
+          SMTP_PASS: ${{ secrets.SMTP_PASS }}
+          SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+          EMAIL_TO: ${{ secrets.EMAIL_TO }}
+          MAIL_TO: ${{ secrets.MAIL_TO }}
+        run: python pavrus-articles-agent.py
+
+      - name: Commit updated cache & history
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add sitemap_cache.json sent_history.json || true
+          git diff --quiet && git diff --staged --quiet || git commit -m "Update cache & sent history [skip ci]"
+          git push
