@@ -1,9 +1,10 @@
 # -*- coding: utf-8 -*-
 """
-pavrus-articles-agent v38
-1. DOCX: статья + новости (всё в одном файле).
-2. Убрана подпись «Павел Гнесюк — музыка и книги».
-3. Статья ЖЁСТКО привязана к конкретной странице (не общие слова).
+pavrus-articles-agent v41
+v40 + анти-нейрослоп на НОВОСТИ (prompt + fix-проход),
+ANTI_SLOP в промпте расширения, переизмерение длины новости,
+сохранение подзаголовков ## в новости (баг v40: replace("#") убивал их).
+Длины: Статья 2000-2500, Новость 700-1000 — фиксируются после анти-слопа.
 """
 import os, json, datetime, time, re, html, smtplib, io, urllib3
 from urllib.parse import urljoin
@@ -52,7 +53,7 @@ ANTI_SLOP = ("Пиши неровно и конкретно: разная дли
 def log(msg):
     print(msg, flush=True)
 
-log("Версия ℹ️ pavrus-articles-agent v38 (DOCX=статья+новости; убрана подпись; статья привязана к конкретной странице)")
+log("Версия ℹ️ pavrus-articles-agent v41 (анти-слоп на Статье И Новости; ## сохраняются; длины: Статья 2000-2500, Новость 700-1000)")
 log(f"🔑 Ключи: gigachat={'ДА' if GIGACHAT_CLIENT_ID else 'НЕТ'}, smtp={'ДА' if SMTP_HOST else 'НЕТ'}, получателей={len(MAIL_TO)}")
 
 # ============================================================
@@ -64,6 +65,24 @@ def fix_brand(txt):
     if fixed != txt:
         log("🏷️ fix_brand: кириллическая транслитерация бренда заменена на PAVRUS")
     return fixed
+
+# ============================================================
+# ФИЛЬТР СТОРОННИХ БРЕНДОВ
+# ============================================================
+
+THIRD_PARTY_BRANDS = [
+    r'\bCypress\b', r'\bGefen\b', r'\bChiayo\b', r'\bClearOne\b', r'\bShure\b',
+    r'\bSennheiser\b', r'\bBosch\b', r'\bBeyerdynamic\b', r'\bAudio-Technica\b',
+    r'\bAKG\b', r'\bJBL\b', r'\bYamaha\b', r'\bSony\b', r'\bPanasonic\b'
+]
+
+def check_pavrus_product(text):
+    if re.search(r'\bPAVRUS\b', text, re.IGNORECASE):
+        return True
+    for pattern in THIRD_PARTY_BRANDS:
+        if re.search(pattern, text, re.IGNORECASE):
+            return False
+    return False
 
 # ============================================================
 # СЕТЬ И КАРТА САЙТА
@@ -208,35 +227,27 @@ def pick_pages(urls, sent, count=5):
         log(f"   {i}. {u}")
     return candidates
 
-# ============================================================
-# v38: парсинг страницы с извлечением h1 и названия товара
-# ============================================================
-
 def parse_page(url):
-    """v38: возвращает dict {title, text} или None."""
     r = http_get(url)
     if r is None or not r.ok or len(r.content) < 500:
         return None
-    
-    # Извлекаем заголовок (h1)
     title = None
     m = re.search(r"(?is)<h1[^>]*>(.*?)</h1>", r.text)
     if m:
         title = re.sub(r"(?s)<[^>]+>", "", m.group(1))
         title = html.unescape(title).strip()
         title = re.sub(r"\s+", " ", title)
-    
-    # Извлекаем основной текст (убираем script/style/head)
     t = re.sub(r"(?is)<(script|style|noscript|svg|head|nav|footer|header).*?>.*?</\1>", " ", r.text)
     t = re.sub(r"(?s)<[^>]+>", " ", t)
     t = html.unescape(t)
     t = re.sub(r"\s+", " ", t).strip()
-    
     if len(t) < 200:
         log(f"⚠️ Текст страницы слишком короткий ({len(t)} симв.)")
         return None
-    
-    log(f"📄 Страница: заголовок = «{(title or '(нет)')[:60]}», текст {len(t)} симв.")
+    if not check_pavrus_product(t):
+        log(f"⚠️ Страница не про продукцию PAVRUS — пропускаю")
+        return None
+    log(f"📄 Страница: заголовок = «{(title or '(нет)')[:60]}», текст {len(t)} симв. (продукция PAVRUS)")
     return {"title": (title or "")[:200], "text": t[:6000], "url": url}
 
 # ============================================================
@@ -246,12 +257,6 @@ def parse_page(url):
 def _extract(r):
     try: return r["choices"][0]["message"]["content"].strip()
     except (KeyError, IndexError, TypeError): return None
-
-def _err_snippet(r):
-    e = r.get("error") or {}
-    code = e.get("code") or e.get("type") or "?"
-    msg = str(e.get("message") or e)
-    return f"{code}: {msg[:100]}"
 
 _GIGACHAT_TOKEN = None
 _GIGACHAT_TOKEN_EXPIRY = 0
@@ -285,8 +290,7 @@ def get_gigachat_token():
 
 def ai_gigachat(prompt):
     token = get_gigachat_token()
-    if not token:
-        return None
+    if not token: return None
     try:
         import requests
         r = requests.post("https://gigachat.devices.sberbank.ru/api/v1/chat/completions",
@@ -381,13 +385,13 @@ def ai_text(prompt, minlen=1500, rescue_min=1200):
             best_res = res
         return None
     log("🔄 Попытка: gigachat...")
-    r = take(ai_gigachat(prompt), "gigachat"); 
+    r = take(ai_gigachat(prompt), "gigachat")
     if r: return r
     log("🔄 Попытка: cerebras...")
-    r = take(ai_cerebras(prompt), "cerebras"); 
+    r = take(ai_cerebras(prompt), "cerebras")
     if r: return r
     log("🔄 Попытка: mistral...")
-    r = take(ai_mistral(prompt), "mistral"); 
+    r = take(ai_mistral(prompt), "mistral")
     if r: return r
     for i, key in enumerate((GROQ_KEY, GROQ_KEY2)):
         if not key: continue
@@ -400,18 +404,22 @@ def ai_text(prompt, minlen=1500, rescue_min=1200):
             r = take(ai_openrouter_auto(prompt, key, mt), f"openrouter (max={mt})")
             if r: return r
     log("🔄 Попытка: pollinations-text...")
-    r = take(ai_pollinations_text(prompt), "pollinations-text"); 
+    r = take(ai_pollinations_text(prompt), "pollinations-text")
     if r: return r
     if best_res and len(best_res) >= rescue_min:
         return best_res
     log("❌ Все провайдеры не дали текст")
     return None
 
+def clean_md(txt):
+    """v41: убирает ** и __, но СОХРАНЯЕТ ## подзаголовки."""
+    return txt.replace("**", "").replace("__", "").strip()
+
 def extend_text(txt, target):
     if not txt or len(txt) >= target: return txt
     ext = ai_gigachat(
-        f"Расширь текст до {target}-{target+400} символов, сохранив стиль и смысл. "
-        f"Без ссылок и Markdown. {BRAND_RULE}\n\nТЕКСТ:\n{txt}")
+        f"Расширь текст до {target}-{target+400} символов, сохранив стиль, смысл и подзаголовки (##). "
+        f"Без ссылок; Markdown только ##. {BRAND_RULE} {ANTI_SLOP}\n\nТЕКСТ:\n{txt}")  # v41: +ANTI_SLOP
     if ext and len(ext) >= target: return ext
     return txt
 
@@ -426,7 +434,7 @@ def enforce_length(txt, lo=2000, hi=2500, target=2200):
         txt = extend_text(txt, target)
     if len(txt) > hi:
         txt = trim_text(txt, hi)
-    log(f"📏 Длина статьи: {len(txt)} симв. (коридор 2000-2500)")
+    log(f"📏 Длина: {len(txt)} симв.")
     return txt
 
 # ============================================================
@@ -472,12 +480,12 @@ def slop_check(txt):
     return score, flags
 
 SLOP_FIX_PROMPT = (
-    "Перепиши текст ниже на русском, СОХРАНИВ смысл, структуру, факты и объём (±10%), "
+    "Перепиши текст ниже на русском, СОХРАНИВ смысл, структуру, подзаголовки (##) и объём (±10%), "
     "но убери маркеры машинного письма: {flags}. Запрещено: оценочные клише, "
     "«не только…, но и…», вилки «от… до…», шаблон «X — это Y», вводные слова в начале абзацев, "
     "итоговые резюме. Верни ТОЛЬКО очищенный текст.")
 
-def anti_slop(txt, label="статья", threshold=3.0):
+def anti_slop(txt, label="текст", threshold=3.0):
     score, flags = slop_check(txt)
     log(f"🧼 slop-score {label}: {score:.1f}/1000 знаков, флагов: {len(flags)}")
     for f in flags[:8]:
@@ -492,52 +500,76 @@ def anti_slop(txt, label="статья", threshold=3.0):
     return fixed if score2 < score else txt
 
 # ============================================================
-# СТАТЬЯ — v38: ЖЁСТКАЯ привязка к конкретной странице
+# СТАТЬЯ (2000-2500, с подзаголовками, только про PAVRUS)
 # ============================================================
 
-def clean_txt(t):
-    return t.replace("**", "").replace("##", "").replace("#", "").strip()
-
 def build_article(page_data):
-    """v38: статья только про конкретный товар/материал со страницы, не общие слова."""
     page_title = page_data.get("title") or "(заголовок не извлечён)"
     page_url = page_data.get("url", "")
     page_text = page_data.get("text", "")[:4000]
-    
     prompt = (f"Напиши статью для авторской рассылки компании PAVRUS. "
-              f"ВАЖНО: пиши ИСКЛЮЧИТЕЛЬНО про следующий конкретный товар/материал, "
-              f"НЕ пиши общих слов обо всём каталоге, обо всём оборудовании PAVRUS или о компании в целом. "
-              f"Заголовок страницы (используй его как ориентир): «{page_title}»\n"
+              f"ВАЖНО: пиши ИСКЛЮЧИТЕЛЬНО про продукцию и решения PAVRUS. "
+              f"ЗАПРЕЩЕНО писать про сторонние бренды (Cypress, Gefen, Chiayo, ClearOne, Shure и т.д.) — "
+              f"игнорируй их, пиши только про PAVRUS. "
+              f"Заголовок страницы (ориентир): «{page_title}»\n"
               f"Адрес страницы: {page_url}\n"
               f"Содержание страницы (фрагмент): {page_text}\n"
               f"Требования: 1. ТОЛЬКО русский язык. {BRAND_RULE} "
-              f"2. Заголовок до 110 символов, основан на названии товара со страницы, "
+              f"2. Заголовок до 110 символов, основан на продукции PAVRUS со страницы, "
               f"БЕЗ слов-меток «Заголовок/Статья». "
-              f"3. Объём СТРОГО 2000-2500 символов, 5-7 абзацев: "
-              f"крючок-вступление про КОНКРЕТНЫЙ товар, его назначение и применение, "
-              f"ключевые характеристики и особенности (взять со страницы), "
-              f"типовые задачи, где он используется, финал с вопросом читателю. "
-              f"4. ОБЯЗАТЕЛЬНО используй в тексте название товара со страницы «{page_title}». "
-              f"5. ЗАПРЕЩЕНО писать общие фразы типа «компания PAVRUS предлагает широкий ассортимент», "
-              f"«каталог оборудования», «вся линейка», «наши решения». "
-              f"6. В ТЕЛЕ статьи НЕ должно быть URL, доменов и слов «ссылка», «перейти». "
-              f"7. НЕ используй Markdown. {ANTI_SLOP}")
+              f"3. СТРУКТУРА С ПОДЗАГОЛОВКАМИ (Markdown ## для подзаголовков): "
+              f"   - Вступление (без подзаголовка): крючок про конкретный продукт PAVRUS "
+              f"   - ## Назначение и применение "
+              f"   - ## Ключевые характеристики "
+              f"   - ## Типовые задачи "
+              f"   - ## Преимущества решения PAVRUS "
+              f"4. Объём СТРОГО 2000-2500 символов (включая подзаголовки). "
+              f"5. ОБЯЗАТЕЛЬНО используй название продукции PAVRUS со страницы «{page_title}». "
+              f"6. ЗАПРЕЩЕНО: общие фразы типа «широкий ассортимент», «каталог оборудования», "
+              f"«вся линейка», «наши решения». "
+              f"7. В ТЕЛЕ статьи НЕ должно быть URL, доменов и слов «ссылка», «перейти». "
+              f"8. НЕ используй Markdown кроме ## для подзаголовков. {ANTI_SLOP}")
     txt = ai_text(prompt, minlen=1500, rescue_min=1200)
     if not txt:
         log("⚠️ Статья не создана — пропускаю отправку")
         return None
-    txt = clean_txt(txt)
-    txt = anti_slop(txt)
-    txt = enforce_length(txt)
+    txt = clean_md(txt)                      # v41: ** убираем, ## сохраняем
+    txt = anti_slop(txt, label="статья")
+    txt = enforce_length(txt, lo=2000, hi=2500, target=2200)
     txt = fix_brand(txt)
     return txt
 
 # ============================================================
-# v38: DOCX = статья + новости (всё в одном файле)
+# НОВОСТЬ (700-1000, сокращённая статья, с подзаголовками) — v41: +анти-слоп
 # ============================================================
 
-def build_docx(headline, article, news_block):
-    """v38: один DOCX со статьёй и новостями."""
+def build_news(article):
+    prompt = (f"Сократи следующую статью до 700-1000 символов, СОХРАНИВ структуру с подзаголовками (##). "
+              f"Убери детали, оставь самое важное: назначение, ключевые характеристики, преимущества. "
+              f"Используй Markdown ## для подзаголовков, другой Markdown запрещён. "
+              f"Верни ТОЛЬКО сокращённый текст (Новость). {ANTI_SLOP}\n\n"   # v41: +ANTI_SLOP
+              f"СТАТЬЯ:\n{article}")
+    news = ai_text(prompt, minlen=600, rescue_min=500)
+    if not news:
+        log("⚠️ Новость не создана — использую обрезку статьи")
+        news = trim_text(article, 1000)
+    news = clean_md(news)                    # v41: ** убираем, ## СОХРАНЯЕМ (баг v40)
+    news = anti_slop(news, label="новость")  # v41: анти-слоп на новости
+    news = fix_brand(news)
+    # v41: переизмерение длины после каждого шага (баг v40: старое значение)
+    if len(news) < 700:
+        log(f"⚠️ Новость коротковата ({len(news)} симв.) — расширяю")
+        news = extend_text(news, 700)
+    if len(news) > 1000:
+        news = trim_text(news, 1000)
+    log(f"📰 Новость: {len(news)} симв.")
+    return news
+
+# ============================================================
+# DOCX = Статья + Новость (оба с подзаголовками)
+# ============================================================
+
+def build_docx(headline, article, news):
     try:
         from docx import Document
     except ImportError:
@@ -545,54 +577,36 @@ def build_docx(headline, article, news_block):
         return None
     try:
         doc = Document()
-        # Блок 1: статья
         doc.add_heading(headline, level=1)
-        for para in article.split("\n"):
-            para = para.strip()
-            if para and para != headline:
-                doc.add_paragraph(para)
-        
-        # Блок 2: новости
-        if news_block:
-            doc.add_page_break()
-            doc.add_heading("Новости каталога PAVRUS", level=1)
-            for line in news_block.split("\n"):
-                line = line.strip()
-                if line.startswith("•"):
-                    doc.add_paragraph(line)
-                elif line:
-                    doc.add_paragraph(line)
-        
+        for line in article.split("\n"):
+            line = line.strip()
+            if not line:
+                continue
+            if line.startswith("## "):
+                doc.add_heading(line[3:], level=2)
+            else:
+                doc.add_paragraph(line)
+        doc.add_page_break()
+        doc.add_heading(f"Новость: {headline}", level=1)
+        for line in news.split("\n"):
+            line = line.strip()
+            if not line:
+                continue
+            if line.startswith("## "):
+                doc.add_heading(line[3:], level=2)
+            else:
+                doc.add_paragraph(line)
         buf = io.BytesIO()
         doc.save(buf)
         data = buf.getvalue()
-        log(f"📎 DOCX собран (статья + новости): {len(data)} байт")
+        log(f"📎 DOCX собран (Статья + Новость): {len(data)} байт")
         return data
     except Exception as e:
         log(f"⚠️ build_docx ошибка: {str(e)[:120]}")
         return None
 
 # ============================================================
-# v38: новости — заголовки других страниц (h1), не общие слова
-# ============================================================
-
-def build_news_block(news_pages):
-    """v38: собирает h1-заголовки других страниц для блока новостей."""
-    items = []
-    for u in news_pages:
-        p = parse_page(u)
-        if p and p.get("title"):
-            items.append(f"• {p['title']} — {u}")
-            log(f"   📰 Новость: {p['title'][:60]}")
-        if len(items) >= 3:
-            break
-    if not items:
-        log("⚠️ Новости собрать не удалось")
-        return ""
-    return "\n".join(items)
-
-# ============================================================
-# ПОЧТА (v38: тело = приветствие + новости + указание на DOCX)
+# ПОЧТА
 # ============================================================
 
 def send_email(subject, body, docx_bytes=None, filename="PAVRUS_article.docx"):
@@ -627,7 +641,7 @@ def send_email(subject, body, docx_bytes=None, filename="PAVRUS_article.docx"):
         return False
 
 # ============================================================
-# ГЛАВНАЯ ЛОГИКА v38
+# ГЛАВНАЯ ЛОГИКА v41
 # ============================================================
 
 def main():
@@ -645,7 +659,7 @@ def main():
         log(f"\n🔄 Попытка {i}/{len(candidates)}: {page}")
         page_data = parse_page(page)
         if not page_data or not page_data.get("text"):
-            log("⚠️ Страница не парсится, пробую следующую...")
+            log("⚠️ Страница не парсится или не про PAVRUS, пробую следующую...")
             continue
 
         article = build_article(page_data)
@@ -653,26 +667,17 @@ def main():
             continue
 
         headline = fix_brand(article.split("\n")[0].strip() or page_data["title"])
-        
-        # v38: новости — заголовки других страниц (h1)
-        news_pages = [c for c in candidates if c != page][:3]
-        news_block = build_news_block(news_pages)
+        news = build_news(article)
 
-        # v38: тело письма = приветствие + краткие новости + указание на DOCX
-        # Подписи «Павел Гнесюк — музыка и книги» НЕТ
         body_lines = ["Здравствуйте!\n"]
-        if news_block:
-            body_lines.append("Новости каталога PAVRUS:")
-            body_lines.append(news_block)
-            body_lines.append("")
-        body_lines.append(f"Полная статья «{headline}» и новости каталога — во вложении (файл DOCX).")
+        body_lines.append(f"Полная статья «{headline}» и новость — во вложении (файл DOCX).")
         body_lines.append("")
         body_lines.append("--")
         body_lines.append("PAVRUS")
         body = "\n".join(body_lines)
 
         day = datetime.date.today().toordinal()
-        docx_bytes = build_docx(headline, article, news_block)
+        docx_bytes = build_docx(headline, article, news)
         filename = f"PAVRUS_article_{day}.docx"
 
         ok = send_email(headline, body, docx_bytes, filename)
@@ -680,12 +685,12 @@ def main():
             sent[page] = str(datetime.date.today())
             save_history(sent)
             log("=" * 50)
-            log(f"✅ FINISH: DOCX (статья + новости) → почта: ДА")
+            log(f"✅ FINISH: Статья {len(article)} симв. + Новость {len(news)} симв. → DOCX → почта: ДА")
             log("=" * 50)
             return
 
     log("=" * 50)
-    log("❌ FINISH: все кандидаты не парсятся или ИИ не сгенерировал текст")
+    log("❌ FINISH: все кандидаты не парсятся, не про PAVRUS или ИИ не сгенерировал текст")
     log("=" * 50)
 
 if __name__ == "__main__":
