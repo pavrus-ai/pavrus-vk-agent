@@ -1,10 +1,11 @@
 # -*- coding: utf-8 -*-
 """
-pavrus-articles-agent v36
-Исправлено: чтение env-переменных по ДВУМ именам (ID/ID1, USER/LOGIN, PASS/PASSWORD, EMAIL_TO/MAIL_TO);
-GIGACHAT_SCOPE и GIGACHAT_MODEL из секретов; pollinations с повтором; диагностика ключей на старте.
+pavrus-articles-agent v38
+1. DOCX: статья + новости (всё в одном файле).
+2. Убрана подпись «Павел Гнесюк — музыка и книги».
+3. Статья ЖЁСТКО привязана к конкретной странице (не общие слова).
 """
-import os, json, datetime, time, re, html, smtplib, urllib3
+import os, json, datetime, time, re, html, smtplib, io, urllib3
 from urllib.parse import urljoin
 from email.message import EmailMessage
 urllib3.disable_warnings()
@@ -16,7 +17,6 @@ SENT_HISTORY = "sent_history.json"
 BROWSER_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
               "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
 
-# v36: читаем ОБА варианта имён секретов
 GIGACHAT_CLIENT_ID = (os.environ.get("GIGACHAT_CLIENT_ID1") or os.environ.get("GIGACHAT_CLIENT_ID") or "").strip()
 GIGACHAT_CLIENT_SECRET = (os.environ.get("GIGACHAT_CLIENT_SECRET1") or os.environ.get("GIGACHAT_CLIENT_SECRET") or "").strip()
 GIGACHAT_SCOPE = (os.environ.get("GIGACHAT_SCOPE") or "GIGACHAT_API_PERS").strip()
@@ -41,6 +41,9 @@ GROQ_MODELS = ["meta-llama/llama-4-scout-17b-16e-instruct",
                "openai/gpt-oss-120b",
                "llama-3.1-8b-instant"]
 
+BRAND_RULE = ("Имя бренда и компании пиши ТОЛЬКО латиницей: PAVRUS. "
+              "ЗАПРЕЩЕНО писать «Паврус», «Паврюс», «ПАВРУС» и любые кириллические транслитерации бренда.")
+
 ANTI_SLOP = ("Пиши неровно и конкретно: разная длина предложений, детали вместо оценок; "
              "ЗАПРЕЩЕНЫ клише «погружает», «не оставит равнодушным», «захватывает с первых страниц», "
              "«судьбы переплетаются», «заставляет задуматься», «не только…, но и…», вилки «от… до…», "
@@ -49,13 +52,21 @@ ANTI_SLOP = ("Пиши неровно и конкретно: разная дли
 def log(msg):
     print(msg, flush=True)
 
-log("Версия ℹ️ pavrus-articles-agent v36 (env-имена с фолбэками; GIGACHAT_SCOPE/MODEL из секретов; pollinations с повтором; диагностика ключей)")
-log(f"🔑 Ключи: gigachat={'ДА' if GIGACHAT_CLIENT_ID else 'НЕТ'}, cerebras={'ДА' if CEREBRAS_KEY else 'НЕТ'}, "
-    f"mistral={'ДА' if MISTRAL_KEY else 'НЕТ'}, groq={'ДА' if GROQ_KEY else 'НЕТ'}, "
-    f"openrouter={'ДА' if OR_KEY else 'НЕТ'}, smtp={'ДА' if SMTP_HOST else 'НЕТ'}, получателей={len(MAIL_TO)}")
+log("Версия ℹ️ pavrus-articles-agent v38 (DOCX=статья+новости; убрана подпись; статья привязана к конкретной странице)")
+log(f"🔑 Ключи: gigachat={'ДА' if GIGACHAT_CLIENT_ID else 'НЕТ'}, smtp={'ДА' if SMTP_HOST else 'НЕТ'}, получателей={len(MAIL_TO)}")
 
 # ============================================================
-# СЕТЬ И КАРТА САЙТА (curl-cffi → playwright → requests)
+# БРЕНД
+# ============================================================
+
+def fix_brand(txt):
+    fixed = re.sub(r'Паврюс|Паврус|ПАВРЮС|ПАВРУС|паврюс|паврус', 'PAVRUS', txt)
+    if fixed != txt:
+        log("🏷️ fix_brand: кириллическая транслитерация бренда заменена на PAVRUS")
+    return fixed
+
+# ============================================================
+# СЕТЬ И КАРТА САЙТА
 # ============================================================
 
 def http_get_curl_cffi(url, timeout=30):
@@ -122,8 +133,7 @@ def http_get(url, timeout=30, tries=3):
     return None
 
 def fetch_sitemap():
-    sitemap_url = f"{SITE}/sitemap-iblock-91.xml"
-    r = http_get(sitemap_url)
+    r = http_get(f"{SITE}/sitemap-iblock-91.xml")
     if r and r.ok and ("<urlset" in r.text or "<sitemapindex" in r.text):
         urls = re.findall(r"<loc>\s*([^<\s]+)\s*</loc>", r.text)
         urls = [u for u in urls if "/catalog/" in u]
@@ -198,25 +208,39 @@ def pick_pages(urls, sent, count=5):
         log(f"   {i}. {u}")
     return candidates
 
-def fetch_page_text(url, limit=6000):
+# ============================================================
+# v38: парсинг страницы с извлечением h1 и названия товара
+# ============================================================
+
+def parse_page(url):
+    """v38: возвращает dict {title, text} или None."""
     r = http_get(url)
-    if r is None or not r.ok:
-        return ""
-    if len(r.content) < 500:
-        log(f"⚠️ Страница вернула заглушку ({len(r.content)} байт) — пропускаю")
-        return ""
-    t = re.sub(r"(?is)<(script|style|noscript|svg|head).*?>.*?</\1>", " ", r.text)
+    if r is None or not r.ok or len(r.content) < 500:
+        return None
+    
+    # Извлекаем заголовок (h1)
+    title = None
+    m = re.search(r"(?is)<h1[^>]*>(.*?)</h1>", r.text)
+    if m:
+        title = re.sub(r"(?s)<[^>]+>", "", m.group(1))
+        title = html.unescape(title).strip()
+        title = re.sub(r"\s+", " ", title)
+    
+    # Извлекаем основной текст (убираем script/style/head)
+    t = re.sub(r"(?is)<(script|style|noscript|svg|head|nav|footer|header).*?>.*?</\1>", " ", r.text)
     t = re.sub(r"(?s)<[^>]+>", " ", t)
     t = html.unescape(t)
     t = re.sub(r"\s+", " ", t).strip()
+    
     if len(t) < 200:
-        log(f"⚠️ Текст страницы слишком короткий ({len(t)} симв.) — пропускаю")
-        return ""
-    log(f"📄 Текст страницы: {len(t)} симв.")
-    return t[:limit]
+        log(f"⚠️ Текст страницы слишком короткий ({len(t)} симв.)")
+        return None
+    
+    log(f"📄 Страница: заголовок = «{(title or '(нет)')[:60]}», текст {len(t)} симв.")
+    return {"title": (title or "")[:200], "text": t[:6000], "url": url}
 
 # ============================================================
-# ИИ-ЦЕПОЧКА (v36: scope/model из секретов, pollinations с повтором)
+# ИИ-ЦЕПОЧКА
 # ============================================================
 
 def _extract(r):
@@ -235,7 +259,6 @@ _GIGACHAT_TOKEN_EXPIRY = 0
 def get_gigachat_token():
     global _GIGACHAT_TOKEN, _GIGACHAT_TOKEN_EXPIRY
     if not GIGACHAT_CLIENT_ID or not GIGACHAT_CLIENT_SECRET:
-        log("   ⚠️ gigachat: ID/SECRET не заданы")
         return None
     if _GIGACHAT_TOKEN and time.time() < _GIGACHAT_TOKEN_EXPIRY:
         return _GIGACHAT_TOKEN
@@ -247,9 +270,8 @@ def get_gigachat_token():
                      "RqUID": str(uuid.uuid4()),
                      "Content-Type": "application/x-www-form-urlencoded"},
             data={"scope": GIGACHAT_SCOPE}, timeout=30, verify=False)
-        log(f"ℹ️ GigaChat OAuth: статус {r.status_code} (scope={GIGACHAT_SCOPE})")
         if r.status_code != 200:
-            log(f"⚠️ GigaChat OAuth тело: {r.text[:200]}")
+            log(f"⚠️ GigaChat OAuth: {r.text[:200]}")
             return None
         j = r.json()
         if "access_token" in j:
@@ -264,7 +286,6 @@ def get_gigachat_token():
 def ai_gigachat(prompt):
     token = get_gigachat_token()
     if not token:
-        log("   ⚠️ gigachat: токен не получен")
         return None
     try:
         import requests
@@ -277,111 +298,63 @@ def ai_gigachat(prompt):
             log(f"   ⚠️ gigachat: статус {r.status_code}: {r.text[:200]}")
             return None
         j = r.json()
-        if "choices" not in j or not j["choices"]:
-            log(f"   ⚠️ gigachat: пустой ответ: {str(j)[:200]}")
-            return None
-        text = j["choices"][0]["message"]["content"].strip()
-        if not text:
-            log("   ⚠️ gigachat: пустой текст")
-            return None
-        log(f"   ✅ gigachat ({GIGACHAT_MODEL}): {len(text)} симв.")
-        return text
+        text = (j.get("choices") or [{}])[0].get("message", {}).get("content", "").strip()
+        if text:
+            log(f"   ✅ gigachat ({GIGACHAT_MODEL}): {len(text)} симв.")
+            return text
     except Exception as e:
         log(f"   ⚠️ gigachat error: {e}")
-        return None
+    return None
 
 def ai_cerebras(prompt):
-    if not CEREBRAS_KEY:
-        log("   ⚠️ cerebras: ключ не задан")
-        return None
+    if not CEREBRAS_KEY: return None
     try:
         import requests
         r = requests.post("https://api.cerebras.ai/v1/chat/completions",
             headers={"Authorization": f"Bearer {CEREBRAS_KEY}"},
             json={"model": "llama-3.3-70b", "temperature": 0.8,
                   "messages": [{"role": "user", "content": prompt + RU}]}, timeout=60).json()
-        if "error" in r:
-            log(f"   ⚠️ cerebras: {_err_snippet(r)}")
-            return None
-        text = _extract(r)
-        if not text:
-            log("   ⚠️ cerebras: пустой текст")
-            return None
-        log(f"   ✅ cerebras: {len(text)} симв.")
-        return text
-    except Exception as e:
-        log(f"   ⚠️ cerebras error: {e}")
-        return None
+        if "error" in r: return None
+        return _extract(r)
+    except Exception: return None
 
 def ai_mistral(prompt):
-    if not MISTRAL_KEY:
-        log("   ⚠️ mistral: ключ не задан")
-        return None
+    if not MISTRAL_KEY: return None
     try:
         import requests
         r = requests.post("https://api.mistral.ai/v1/chat/completions",
             headers={"Authorization": f"Bearer {MISTRAL_KEY}"},
             json={"model": "mistral-small-latest", "temperature": 0.8,
                   "messages": [{"role": "user", "content": prompt + RU}]}, timeout=60).json()
-        if "error" in r:
-            log(f"   ⚠️ mistral: {_err_snippet(r)}")
-            return None
-        text = _extract(r)
-        if not text:
-            log("   ⚠️ mistral: пустой текст")
-            return None
-        log(f"   ✅ mistral: {len(text)} симв.")
-        return text
-    except Exception as e:
-        log(f"   ⚠️ mistral error: {e}")
-        return None
+        if "error" in r: return None
+        return _extract(r)
+    except Exception: return None
 
 def ai_groq(prompt, key, model):
-    if not key:
-        return None
+    if not key: return None
     try:
         import requests
         r = requests.post("https://api.groq.com/openai/v1/chat/completions",
             headers={"Authorization": f"Bearer {key}"},
             json={"model": model, "temperature": 0.8,
                   "messages": [{"role": "user", "content": prompt + RU}]}, timeout=60).json()
-        if "error" in r:
-            log(f"   ⚠️ groq {model}: {_err_snippet(r)}")
-            return None
-        text = _extract(r)
-        if not text:
-            log(f"   ⚠️ groq {model}: пустой текст")
-            return None
-        log(f"   ✅ groq {model}: {len(text)} симв.")
-        return text
-    except Exception as e:
-        log(f"   ⚠️ groq {model} error: {e}")
-        return None
+        if "error" in r: return None
+        return _extract(r)
+    except Exception: return None
 
 def ai_openrouter_auto(prompt, key, max_tokens):
-    if not key:
-        return None
+    if not key: return None
     try:
         import requests
         r = requests.post("https://openrouter.ai/api/v1/chat/completions",
             headers={"Authorization": f"Bearer {key}", "HTTP-Referer": "https://github.com"},
             json={"model": "auto", "temperature": 0.8, "max_tokens": max_tokens,
                   "messages": [{"role": "user", "content": prompt + RU}]}, timeout=60).json()
-        if "error" in r:
-            log(f"   ⚠️ openrouter (max={max_tokens}): {_err_snippet(r)}")
-            return None
-        text = _extract(r)
-        if not text:
-            log(f"   ⚠️ openrouter (max={max_tokens}): пустой текст")
-            return None
-        log(f"   ✅ openrouter (max={max_tokens}): {len(text)} симв.")
-        return text
-    except Exception as e:
-        log(f"   ⚠️ openrouter error: {e}")
-        return None
+        if "error" in r: return None
+        return _extract(r)
+    except Exception: return None
 
 def ai_pollinations_text(prompt):
-    """v36: две попытки, контроль статуса."""
     for attempt in range(2):
         try:
             import requests
@@ -389,73 +362,57 @@ def ai_pollinations_text(prompt):
                 json={"model": "openai", "temperature": 0.8,
                       "messages": [{"role": "user", "content": prompt + RU}]}, timeout=90)
             if r.status_code != 200:
-                log(f"   ⚠️ pollinations-text: статус {r.status_code} (попытка {attempt+1})")
-                time.sleep(3)
-                continue
+                time.sleep(3); continue
             text = _extract(r.json())
-            if text:
-                log(f"   ✅ pollinations-text: {len(text)} симв.")
-                return text
-            log(f"   ⚠️ pollinations-text: пустой текст (попытка {attempt+1})")
-        except Exception as e:
-            log(f"   ⚠️ pollinations-text error: {str(e)[:80]}")
+            if text: return text
+        except Exception: pass
         time.sleep(3)
     return None
 
 def ai_text(prompt, minlen=1500, rescue_min=1200):
     best_res = ""
-
     def take(res, label):
         nonlocal best_res
-        if not res:
-            return None
+        if not res: return None
         if len(res) >= minlen:
             log(f"✅ Успех: {label}, {len(res)} симв.")
             return res
-        log(f"   ⚠️ {label}: текст короче нужного ({len(res)}/{minlen}) — запомнен кандидатом")
         if len(res) > len(best_res):
             best_res = res
         return None
-
     log("🔄 Попытка: gigachat...")
-    r = take(ai_gigachat(prompt), "gigachat")
+    r = take(ai_gigachat(prompt), "gigachat"); 
     if r: return r
-    log("🔄 Попытка: cerebras (llama-3.3-70b)...")
-    r = take(ai_cerebras(prompt), "cerebras")
+    log("🔄 Попытка: cerebras...")
+    r = take(ai_cerebras(prompt), "cerebras"); 
     if r: return r
-    log("🔄 Попытка: mistral (mistral-small)...")
-    r = take(ai_mistral(prompt), "mistral")
+    log("🔄 Попытка: mistral...")
+    r = take(ai_mistral(prompt), "mistral"); 
     if r: return r
     for i, key in enumerate((GROQ_KEY, GROQ_KEY2)):
         if not key: continue
         for model in GROQ_MODELS:
-            log(f"🔄 Попытка: groq ({model}, ключ {i+1})...")
             r = take(ai_groq(prompt, key, model), f"groq ({model})")
             if r: return r
     for i, key in enumerate((OR_KEY, OR_KEY2)):
         if not key: continue
         for mt in (4000, 2000):
-            log(f"🔄 Попытка: openrouter auto (max={mt}, ключ {i+1})...")
             r = take(ai_openrouter_auto(prompt, key, mt), f"openrouter (max={mt})")
             if r: return r
-    log("🔄 Попытка: pollinations-text (без ключа)...")
-    r = take(ai_pollinations_text(prompt), "pollinations-text")
+    log("🔄 Попытка: pollinations-text...")
+    r = take(ai_pollinations_text(prompt), "pollinations-text"); 
     if r: return r
     if best_res and len(best_res) >= rescue_min:
-        log(f"ℹ️ Беру лучший кандидат ({len(best_res)} симв.)")
         return best_res
-    log("❌ Все провайдеры не дали текст достаточной длины")
+    log("❌ Все провайдеры не дали текст")
     return None
 
 def extend_text(txt, target):
-    if not txt or len(txt) >= target:
-        return txt
+    if not txt or len(txt) >= target: return txt
     ext = ai_gigachat(
-        f"Расширь текст до {target}-{target+400} символов, сохранив стиль, смысл и структуру. "
-        f"Добавь детали и конкретику. Без ссылок и Markdown.\n\nТЕКСТ:\n{txt}")
-    if ext and len(ext) >= target:
-        log(f"✅ Расширено: {len(ext)} симв.")
-        return ext
+        f"Расширь текст до {target}-{target+400} символов, сохранив стиль и смысл. "
+        f"Без ссылок и Markdown. {BRAND_RULE}\n\nТЕКСТ:\n{txt}")
+    if ext and len(ext) >= target: return ext
     return txt
 
 def trim_text(t, limit):
@@ -518,8 +475,7 @@ SLOP_FIX_PROMPT = (
     "Перепиши текст ниже на русском, СОХРАНИВ смысл, структуру, факты и объём (±10%), "
     "но убери маркеры машинного письма: {flags}. Запрещено: оценочные клише, "
     "«не только…, но и…», вилки «от… до…», шаблон «X — это Y», вводные слова в начале абзацев, "
-    "итоговые резюме. Пиши неровно: чередуй короткие и длинные предложения, добавь конкретику "
-    "вместо оценок. Верни ТОЛЬКО очищенный текст.")
+    "итоговые резюме. Верни ТОЛЬКО очищенный текст.")
 
 def anti_slop(txt, label="статья", threshold=3.0):
     score, flags = slop_check(txt)
@@ -530,28 +486,42 @@ def anti_slop(txt, label="статья", threshold=3.0):
         return txt
     fl = "; ".join(sorted({f['name'] for f in flags}))
     fixed = ai_gigachat(SLOP_FIX_PROMPT.format(flags=fl))
-    if not fixed:
-        return txt
+    if not fixed: return txt
     score2, flags2 = slop_check(fixed)
-    log(f"🧼 после fix-прохода: {score2:.1f}/1000 (было {score:.1f}), флагов: {len(flags2)}")
+    log(f"🧼 после fix-прохода: {score2:.1f}/1000 (было {score:.1f})")
     return fixed if score2 < score else txt
 
 # ============================================================
-# СТАТЬЯ
+# СТАТЬЯ — v38: ЖЁСТКАЯ привязка к конкретной странице
 # ============================================================
 
 def clean_txt(t):
     return t.replace("**", "").replace("##", "").replace("#", "").strip()
 
-def build_article(page_url, page_text):
-    prompt = (f"Напиши статью для авторской рассылки по материалу страницы сайта Павла Гнесюка. "
-              f"Содержание страницы (фрагмент): {page_text[:4000]} "
-              f"Требования: 1. ТОЛЬКО русский язык. "
-              f"2. Заголовок до 110 символов, живой, БЕЗ слов-меток «Заголовок/Статья». "
-              f"3. Объём СТРОГО 2000-2500 символов, 5-7 абзацев: крючок-вступление, суть материала, "
-              f"детали и атмосфера, ключевой момент, финал с вопросом читателю. "
-              f"4. В ТЕЛЕ статьи НЕ должно быть URL, доменов и слов «ссылка», «перейти». "
-              f"5. НЕ используй Markdown. {ANTI_SLOP}")
+def build_article(page_data):
+    """v38: статья только про конкретный товар/материал со страницы, не общие слова."""
+    page_title = page_data.get("title") or "(заголовок не извлечён)"
+    page_url = page_data.get("url", "")
+    page_text = page_data.get("text", "")[:4000]
+    
+    prompt = (f"Напиши статью для авторской рассылки компании PAVRUS. "
+              f"ВАЖНО: пиши ИСКЛЮЧИТЕЛЬНО про следующий конкретный товар/материал, "
+              f"НЕ пиши общих слов обо всём каталоге, обо всём оборудовании PAVRUS или о компании в целом. "
+              f"Заголовок страницы (используй его как ориентир): «{page_title}»\n"
+              f"Адрес страницы: {page_url}\n"
+              f"Содержание страницы (фрагмент): {page_text}\n"
+              f"Требования: 1. ТОЛЬКО русский язык. {BRAND_RULE} "
+              f"2. Заголовок до 110 символов, основан на названии товара со страницы, "
+              f"БЕЗ слов-меток «Заголовок/Статья». "
+              f"3. Объём СТРОГО 2000-2500 символов, 5-7 абзацев: "
+              f"крючок-вступление про КОНКРЕТНЫЙ товар, его назначение и применение, "
+              f"ключевые характеристики и особенности (взять со страницы), "
+              f"типовые задачи, где он используется, финал с вопросом читателю. "
+              f"4. ОБЯЗАТЕЛЬНО используй в тексте название товара со страницы «{page_title}». "
+              f"5. ЗАПРЕЩЕНО писать общие фразы типа «компания PAVRUS предлагает широкий ассортимент», "
+              f"«каталог оборудования», «вся линейка», «наши решения». "
+              f"6. В ТЕЛЕ статьи НЕ должно быть URL, доменов и слов «ссылка», «перейти». "
+              f"7. НЕ используй Markdown. {ANTI_SLOP}")
     txt = ai_text(prompt, minlen=1500, rescue_min=1200)
     if not txt:
         log("⚠️ Статья не создана — пропускаю отправку")
@@ -559,15 +529,75 @@ def build_article(page_url, page_text):
     txt = clean_txt(txt)
     txt = anti_slop(txt)
     txt = enforce_length(txt)
+    txt = fix_brand(txt)
     return txt
 
 # ============================================================
-# ПОЧТА (v36: имена SMTP_USER/SMTP_PASS/EMAIL_TO тоже понимаются)
+# v38: DOCX = статья + новости (всё в одном файле)
 # ============================================================
 
-def send_email(subject, body):
+def build_docx(headline, article, news_block):
+    """v38: один DOCX со статьёй и новостями."""
+    try:
+        from docx import Document
+    except ImportError:
+        log("⚠️ python-docx не установлен — вложения не будет")
+        return None
+    try:
+        doc = Document()
+        # Блок 1: статья
+        doc.add_heading(headline, level=1)
+        for para in article.split("\n"):
+            para = para.strip()
+            if para and para != headline:
+                doc.add_paragraph(para)
+        
+        # Блок 2: новости
+        if news_block:
+            doc.add_page_break()
+            doc.add_heading("Новости каталога PAVRUS", level=1)
+            for line in news_block.split("\n"):
+                line = line.strip()
+                if line.startswith("•"):
+                    doc.add_paragraph(line)
+                elif line:
+                    doc.add_paragraph(line)
+        
+        buf = io.BytesIO()
+        doc.save(buf)
+        data = buf.getvalue()
+        log(f"📎 DOCX собран (статья + новости): {len(data)} байт")
+        return data
+    except Exception as e:
+        log(f"⚠️ build_docx ошибка: {str(e)[:120]}")
+        return None
+
+# ============================================================
+# v38: новости — заголовки других страниц (h1), не общие слова
+# ============================================================
+
+def build_news_block(news_pages):
+    """v38: собирает h1-заголовки других страниц для блока новостей."""
+    items = []
+    for u in news_pages:
+        p = parse_page(u)
+        if p and p.get("title"):
+            items.append(f"• {p['title']} — {u}")
+            log(f"   📰 Новость: {p['title'][:60]}")
+        if len(items) >= 3:
+            break
+    if not items:
+        log("⚠️ Новости собрать не удалось")
+        return ""
+    return "\n".join(items)
+
+# ============================================================
+# ПОЧТА (v38: тело = приветствие + новости + указание на DOCX)
+# ============================================================
+
+def send_email(subject, body, docx_bytes=None, filename="PAVRUS_article.docx"):
     if not SMTP_HOST or not SMTP_LOGIN or not MAIL_TO:
-        log(f"⚠️ Почта не настроена: host={'ДА' if SMTP_HOST else 'НЕТ'}, login={'ДА' if SMTP_LOGIN else 'НЕТ'}, получателей={len(MAIL_TO)}")
+        log(f"⚠️ Почта не настроена")
         return False
     try:
         msg = EmailMessage()
@@ -575,6 +605,13 @@ def send_email(subject, body):
         msg["From"] = MAIL_FROM
         msg["To"] = ", ".join(MAIL_TO)
         msg.set_content(body)
+        if docx_bytes:
+            msg.add_attachment(
+                docx_bytes,
+                maintype="application",
+                subtype="vnd.openxmlformats-officedocument.wordprocessingml.document",
+                filename=filename)
+            log(f"📎 Вложение добавлено: {filename}")
         if SMTP_PORT == 465:
             server = smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, timeout=60)
         else:
@@ -590,7 +627,7 @@ def send_email(subject, body):
         return False
 
 # ============================================================
-# ГЛАВНАЯ ЛОГИКА
+# ГЛАВНАЯ ЛОГИКА v38
 # ============================================================
 
 def main():
@@ -606,25 +643,44 @@ def main():
 
     for i, page in enumerate(candidates, 1):
         log(f"\n🔄 Попытка {i}/{len(candidates)}: {page}")
-        page_text = fetch_page_text(page)
-        if not page_text:
+        page_data = parse_page(page)
+        if not page_data or not page_data.get("text"):
             log("⚠️ Страница не парсится, пробую следующую...")
             continue
 
-        article = build_article(page, page_text)
+        article = build_article(page_data)
         if not article:
             continue
 
-        headline = article.split("\n")[0].strip()
-        body = (article +
-                f"\n\n---\nПолный материал на сайте: {page}\nПавел Гнесюк — музыка и книги.")
+        headline = fix_brand(article.split("\n")[0].strip() or page_data["title"])
+        
+        # v38: новости — заголовки других страниц (h1)
+        news_pages = [c for c in candidates if c != page][:3]
+        news_block = build_news_block(news_pages)
 
-        ok = send_email(headline, body)
+        # v38: тело письма = приветствие + краткие новости + указание на DOCX
+        # Подписи «Павел Гнесюк — музыка и книги» НЕТ
+        body_lines = ["Здравствуйте!\n"]
+        if news_block:
+            body_lines.append("Новости каталога PAVRUS:")
+            body_lines.append(news_block)
+            body_lines.append("")
+        body_lines.append(f"Полная статья «{headline}» и новости каталога — во вложении (файл DOCX).")
+        body_lines.append("")
+        body_lines.append("--")
+        body_lines.append("PAVRUS")
+        body = "\n".join(body_lines)
+
+        day = datetime.date.today().toordinal()
+        docx_bytes = build_docx(headline, article, news_block)
+        filename = f"PAVRUS_article_{day}.docx"
+
+        ok = send_email(headline, body, docx_bytes, filename)
         if ok:
             sent[page] = str(datetime.date.today())
             save_history(sent)
             log("=" * 50)
-            log(f"✅ FINISH: статья {len(article)} симв. → почта: ДА")
+            log(f"✅ FINISH: DOCX (статья + новости) → почта: ДА")
             log("=" * 50)
             return
 
