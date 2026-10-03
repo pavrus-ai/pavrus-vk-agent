@@ -30,6 +30,7 @@ jobs:
           VK_TOKEN: ${{ secrets.VK_TOKEN }}
           VK_USER_TOKEN: ${{ secrets.VK_USER_TOKEN }}
           VK_GROUP_ID: ${{ secrets.VK_GROUP_ID }}
+          VK_ALBUM_ID: ${{ secrets.VK_ALBUM_ID }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           GIGACHAT_CLIENT_ID1: ${{ secrets.GIGACHAT_CLIENT_ID1 }}
