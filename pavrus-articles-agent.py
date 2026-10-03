@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 """
-pavrus-articles-agent v35
-Исправлено: добавлены Groq + OpenRouter + Pollinations в цепочку ИИ.
-Детальное логирование всех ошибок генерации текста.
+pavrus-articles-agent v36
+Исправлено: чтение env-переменных по ДВУМ именам (ID/ID1, USER/LOGIN, PASS/PASSWORD, EMAIL_TO/MAIL_TO);
+GIGACHAT_SCOPE и GIGACHAT_MODEL из секретов; pollinations с повтором; диагностика ключей на старте.
 """
 import os, json, datetime, time, re, html, smtplib, urllib3
 from urllib.parse import urljoin
@@ -16,9 +16,11 @@ SENT_HISTORY = "sent_history.json"
 BROWSER_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
               "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
 
-# AI-ключи
-GIGACHAT_CLIENT_ID = os.environ.get("GIGACHAT_CLIENT_ID1", "").strip()
-GIGACHAT_CLIENT_SECRET = os.environ.get("GIGACHAT_CLIENT_SECRET1", "").strip()
+# v36: читаем ОБА варианта имён секретов
+GIGACHAT_CLIENT_ID = (os.environ.get("GIGACHAT_CLIENT_ID1") or os.environ.get("GIGACHAT_CLIENT_ID") or "").strip()
+GIGACHAT_CLIENT_SECRET = (os.environ.get("GIGACHAT_CLIENT_SECRET1") or os.environ.get("GIGACHAT_CLIENT_SECRET") or "").strip()
+GIGACHAT_SCOPE = (os.environ.get("GIGACHAT_SCOPE") or "GIGACHAT_API_PERS").strip()
+GIGACHAT_MODEL = (os.environ.get("GIGACHAT_MODEL") or "GigaChat:latest").strip()
 CEREBRAS_KEY = os.environ.get("CEREBRAS_KEY", "").strip()
 MISTRAL_KEY = os.environ.get("MISTRAL_KEY", "").strip()
 GROQ_KEY = os.environ.get("GROQ_KEY", "").strip()
@@ -26,13 +28,12 @@ GROQ_KEY2 = os.environ.get("GROQ_KEY2", "").strip()
 OR_KEY = os.environ.get("OPENROUTER_KEY", "").strip()
 OR_KEY2 = os.environ.get("OPENROUTER_KEY2", "").strip()
 
-# Почта
 SMTP_HOST = os.environ.get("SMTP_HOST", "").strip()
 SMTP_PORT = int(os.environ.get("SMTP_PORT", "465").strip() or 465)
-SMTP_LOGIN = os.environ.get("SMTP_LOGIN", "").strip()
-SMTP_PASSWORD = os.environ.get("SMTP_PASSWORD", "").strip()
-MAIL_FROM = os.environ.get("MAIL_FROM", "").strip() or SMTP_LOGIN
-MAIL_TO = [x.strip() for x in os.environ.get("MAIL_TO", "").split(",") if x.strip()]
+SMTP_LOGIN = (os.environ.get("SMTP_LOGIN") or os.environ.get("SMTP_USER") or "").strip()
+SMTP_PASSWORD = (os.environ.get("SMTP_PASSWORD") or os.environ.get("SMTP_PASS") or "").strip()
+MAIL_FROM = (os.environ.get("MAIL_FROM") or SMTP_LOGIN).strip()
+MAIL_TO = [x.strip() for x in (os.environ.get("MAIL_TO") or os.environ.get("EMAIL_TO") or "").split(",") if x.strip()]
 
 RU = "\n\nВАЖНО: Пиши ТОЛЬКО на русском языке."
 GROQ_MODELS = ["meta-llama/llama-4-scout-17b-16e-instruct",
@@ -48,7 +49,10 @@ ANTI_SLOP = ("Пиши неровно и конкретно: разная дли
 def log(msg):
     print(msg, flush=True)
 
-log("Версия ℹ️ pavrus-articles-agent v35 (полная цепочка ИИ: GigaChat → Cerebras → Mistral → Groq → OpenRouter → Pollinations; детальное логирование)")
+log("Версия ℹ️ pavrus-articles-agent v36 (env-имена с фолбэками; GIGACHAT_SCOPE/MODEL из секретов; pollinations с повтором; диагностика ключей)")
+log(f"🔑 Ключи: gigachat={'ДА' if GIGACHAT_CLIENT_ID else 'НЕТ'}, cerebras={'ДА' if CEREBRAS_KEY else 'НЕТ'}, "
+    f"mistral={'ДА' if MISTRAL_KEY else 'НЕТ'}, groq={'ДА' if GROQ_KEY else 'НЕТ'}, "
+    f"openrouter={'ДА' if OR_KEY else 'НЕТ'}, smtp={'ДА' if SMTP_HOST else 'НЕТ'}, получателей={len(MAIL_TO)}")
 
 # ============================================================
 # СЕТЬ И КАРТА САЙТА (curl-cffi → playwright → requests)
@@ -212,7 +216,7 @@ def fetch_page_text(url, limit=6000):
     return t[:limit]
 
 # ============================================================
-# ИИ-ЦЕПОЧКА ТЕКСТА (v35: полная цепочка с логированием)
+# ИИ-ЦЕПОЧКА (v36: scope/model из секретов, pollinations с повтором)
 # ============================================================
 
 def _extract(r):
@@ -231,6 +235,7 @@ _GIGACHAT_TOKEN_EXPIRY = 0
 def get_gigachat_token():
     global _GIGACHAT_TOKEN, _GIGACHAT_TOKEN_EXPIRY
     if not GIGACHAT_CLIENT_ID or not GIGACHAT_CLIENT_SECRET:
+        log("   ⚠️ gigachat: ID/SECRET не заданы")
         return None
     if _GIGACHAT_TOKEN and time.time() < _GIGACHAT_TOKEN_EXPIRY:
         return _GIGACHAT_TOKEN
@@ -241,10 +246,10 @@ def get_gigachat_token():
             headers={"Authorization": f"Basic {credentials}",
                      "RqUID": str(uuid.uuid4()),
                      "Content-Type": "application/x-www-form-urlencoded"},
-            data={"scope": "GIGACHAT_API_PERS"}, timeout=30, verify=False)
-        log(f"ℹ️ GigaChat OAuth: статус {r.status_code}")
+            data={"scope": GIGACHAT_SCOPE}, timeout=30, verify=False)
+        log(f"ℹ️ GigaChat OAuth: статус {r.status_code} (scope={GIGACHAT_SCOPE})")
         if r.status_code != 200:
-            log(f"⚠️ GigaChat OAuth: {r.text[:200]}")
+            log(f"⚠️ GigaChat OAuth тело: {r.text[:200]}")
             return None
         j = r.json()
         if "access_token" in j:
@@ -265,7 +270,7 @@ def ai_gigachat(prompt):
         import requests
         r = requests.post("https://gigachat.devices.sberbank.ru/api/v1/chat/completions",
             headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
-            json={"model": "GigaChat:latest", "temperature": 0.9, "max_tokens": 4000,
+            json={"model": GIGACHAT_MODEL, "temperature": 0.9, "max_tokens": 4000,
                   "messages": [{"role": "user", "content": prompt + RU}]},
             timeout=120, verify=False)
         if r.status_code != 200:
@@ -279,7 +284,7 @@ def ai_gigachat(prompt):
         if not text:
             log("   ⚠️ gigachat: пустой текст")
             return None
-        log(f"   ✅ gigachat: {len(text)} симв.")
+        log(f"   ✅ gigachat ({GIGACHAT_MODEL}): {len(text)} симв.")
         return text
     except Exception as e:
         log(f"   ⚠️ gigachat error: {e}")
@@ -333,7 +338,6 @@ def ai_mistral(prompt):
 
 def ai_groq(prompt, key, model):
     if not key:
-        log(f"   ⚠️ groq {model}: ключ не задан")
         return None
     try:
         import requests
@@ -356,7 +360,6 @@ def ai_groq(prompt, key, model):
 
 def ai_openrouter_auto(prompt, key, max_tokens):
     if not key:
-        log(f"   ⚠️ openrouter (max={max_tokens}): ключ не задан")
         return None
     try:
         import requests
@@ -378,23 +381,28 @@ def ai_openrouter_auto(prompt, key, max_tokens):
         return None
 
 def ai_pollinations_text(prompt):
-    try:
-        import requests
-        r = requests.post("https://text.pollinations.ai/openai",
-            json={"model": "openai", "temperature": 0.8,
-                  "messages": [{"role": "user", "content": prompt + RU}]}, timeout=90).json()
-        text = _extract(r)
-        if not text:
-            log("   ⚠️ pollinations-text: пустой текст")
-            return None
-        log(f"   ✅ pollinations-text: {len(text)} симв.")
-        return text
-    except Exception as e:
-        log(f"   ⚠️ pollinations-text error: {e}")
-        return None
+    """v36: две попытки, контроль статуса."""
+    for attempt in range(2):
+        try:
+            import requests
+            r = requests.post("https://text.pollinations.ai/openai",
+                json={"model": "openai", "temperature": 0.8,
+                      "messages": [{"role": "user", "content": prompt + RU}]}, timeout=90)
+            if r.status_code != 200:
+                log(f"   ⚠️ pollinations-text: статус {r.status_code} (попытка {attempt+1})")
+                time.sleep(3)
+                continue
+            text = _extract(r.json())
+            if text:
+                log(f"   ✅ pollinations-text: {len(text)} симв.")
+                return text
+            log(f"   ⚠️ pollinations-text: пустой текст (попытка {attempt+1})")
+        except Exception as e:
+            log(f"   ⚠️ pollinations-text error: {str(e)[:80]}")
+        time.sleep(3)
+    return None
 
 def ai_text(prompt, minlen=1500, rescue_min=1200):
-    """v35: полная цепочка с детальным логированием."""
     best_res = ""
 
     def take(res, label):
@@ -409,40 +417,33 @@ def ai_text(prompt, minlen=1500, rescue_min=1200):
             best_res = res
         return None
 
-    log("🔄 Попытка: gigachat (GigaChat:latest)...")
+    log("🔄 Попытка: gigachat...")
     r = take(ai_gigachat(prompt), "gigachat")
     if r: return r
-    
     log("🔄 Попытка: cerebras (llama-3.3-70b)...")
     r = take(ai_cerebras(prompt), "cerebras")
     if r: return r
-    
     log("🔄 Попытка: mistral (mistral-small)...")
     r = take(ai_mistral(prompt), "mistral")
     if r: return r
-    
     for i, key in enumerate((GROQ_KEY, GROQ_KEY2)):
         if not key: continue
         for model in GROQ_MODELS:
             log(f"🔄 Попытка: groq ({model}, ключ {i+1})...")
             r = take(ai_groq(prompt, key, model), f"groq ({model})")
             if r: return r
-    
     for i, key in enumerate((OR_KEY, OR_KEY2)):
         if not key: continue
         for mt in (4000, 2000):
             log(f"🔄 Попытка: openrouter auto (max={mt}, ключ {i+1})...")
             r = take(ai_openrouter_auto(prompt, key, mt), f"openrouter (max={mt})")
             if r: return r
-    
     log("🔄 Попытка: pollinations-text (без ключа)...")
     r = take(ai_pollinations_text(prompt), "pollinations-text")
     if r: return r
-    
     if best_res and len(best_res) >= rescue_min:
         log(f"ℹ️ Беру лучший кандидат ({len(best_res)} симв.)")
         return best_res
-    
     log("❌ Все провайдеры не дали текст достаточной длины")
     return None
 
@@ -561,12 +562,12 @@ def build_article(page_url, page_text):
     return txt
 
 # ============================================================
-# ПОЧТА
+# ПОЧТА (v36: имена SMTP_USER/SMTP_PASS/EMAIL_TO тоже понимаются)
 # ============================================================
 
 def send_email(subject, body):
     if not SMTP_HOST or not SMTP_LOGIN or not MAIL_TO:
-        log("⚠️ SMTP_HOST/SMTP_LOGIN/MAIL_TO не заданы — письмо не отправлено")
+        log(f"⚠️ Почта не настроена: host={'ДА' if SMTP_HOST else 'НЕТ'}, login={'ДА' if SMTP_LOGIN else 'НЕТ'}, получателей={len(MAIL_TO)}")
         return False
     try:
         msg = EmailMessage()
@@ -589,7 +590,7 @@ def send_email(subject, body):
         return False
 
 # ============================================================
-# ГЛАВНАЯ ЛОГИКА v35
+# ГЛАВНАЯ ЛОГИКА
 # ============================================================
 
 def main():
@@ -607,9 +608,9 @@ def main():
         log(f"\n🔄 Попытка {i}/{len(candidates)}: {page}")
         page_text = fetch_page_text(page)
         if not page_text:
-            log(f"⚠️ Страница не парсится, пробую следующую...")
+            log("⚠️ Страница не парсится, пробую следующую...")
             continue
-        
+
         article = build_article(page, page_text)
         if not article:
             continue
@@ -626,7 +627,7 @@ def main():
             log(f"✅ FINISH: статья {len(article)} симв. → почта: ДА")
             log("=" * 50)
             return
-    
+
     log("=" * 50)
     log("❌ FINISH: все кандидаты не парсятся или ИИ не сгенерировал текст")
     log("=" * 50)
