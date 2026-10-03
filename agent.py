@@ -4,7 +4,7 @@ from PIL import Image
 urllib3.disable_warnings()
 
 # ============================================================
-# КОНФИГУРАЦИЯ (ВСЕ ПРОБЕЛЫ ВНУТРИ КАВЫЧЕК УДАЛЕНЫ)
+# КОНФИГУРАЦИЯ
 # ============================================================
 VK_TOKEN = os.environ.get("VK_TOKEN", "").strip()
 VK_USER_TOKEN = os.environ.get("VK_USER_TOKEN", "").strip()
@@ -27,6 +27,9 @@ HISTORY = "history_vk.json"
 CACHE = "sitemap_cache.json"
 API = "https://api.vk.com/method/"
 VK_V = "5.131"
+
+# v53: пост без картинки запрещён (0 = разрешить как раньше)
+STRICT_IMAGE = os.environ.get("STRICT_IMAGE", "1").strip() != "0"
 
 BRAND_SLUGS = ["pavrus", "htdz", "ht-dz", "chartu", "restmoment", "rest-moment"]
 BL = ["корзин", "кабинет", "избранн", "сравнени", "войти", "заказать звонок",
@@ -55,7 +58,7 @@ def clean_slop(text):
 def log(msg):
     print(msg, flush=True)
 
-log("pavrus-vk-agent v52 (Playwright, локальный кэш, ОДИН пост, АНТИ-НЕЙРОСЛОП)")
+log("pavrus-vk-agent v53 (фолбэк фото на групповой токен; ретраи saveWallPhoto; история после успеха; STRICT_IMAGE; health-check токенов)")
 
 # ============================================================
 # PLAYWRIGHT: обход JS-защиты Beget
@@ -152,7 +155,6 @@ def parse_text(r):
         m = re.search(r"<title[^>]*>(.*?)</title>", r, re.S | re.I)
         h1 = clean(m.group(1)) if m else ""
     h1 = re.split(r"\s*[—|]\s*", h1)[0].strip()
-
     desc = ""
     for pat in (r'<meta[^>]+name=["\']description["\'][^>]+content=["\'](.*?)["\']',
                 r'<meta[^>]+content=["\'](.*?)["\'][^>]+name=["\']description["\']'):
@@ -161,12 +163,10 @@ def parse_text(r):
             desc = clean(dm.group(1))
             if desc:
                 break
-
     tail = re.sub(r"<script[^>]*>.*?</script>", " ", r, flags=re.S | re.I)
     tail = re.sub(r"<style[^>]*>.*?</style>", " ", tail, flags=re.S | re.I)
     chunks = re.findall(r"<p[^>]*>(.*?)</p>", tail, re.S | re.I)
     raw = " ".join(clean(c) for c in chunks)
-
     seen = set()
     keep = []
     for s in raw.split(". "):
@@ -178,7 +178,6 @@ def parse_text(r):
             continue
         seen.add(low)
         keep.append(s)
-
     return h1, desc, ". ".join(keep)[:2000]
 
 def parse_gallery(r):
@@ -252,7 +251,7 @@ def ai_call(prompt, minlen=700):
     return None
 
 # ============================================================
-# ВК (с защитой от Flood Control)
+# ВК (с защитой от Flood Control) — v53: health-check + фолбэк токенов
 # ============================================================
 def vk_call(method, params, token, retries=5):
     p = dict(params or {})
@@ -277,14 +276,24 @@ def vk_call(method, params, token, retries=5):
     log(f"VK {method}: все {retries} попыток исчерпаны")
     return None
 
+def vk_health():
+    """v53: проверка живости токенов на старте — истёкший виден сразу."""
+    if VK_TOKEN:
+        r = vk_call("groups.getById", {"group_id": VK_GROUP_ID}, VK_TOKEN, retries=1)
+        log(f"🩺 VK_TOKEN (группа): {'ОК' if r else 'ОШИБКА/истёк'}")
+    else:
+        log("⚠️ VK_TOKEN не задан")
+    if VK_USER_TOKEN:
+        r = vk_call("users.get", {}, VK_USER_TOKEN, retries=1)
+        log(f"🩺 VK_USER_TOKEN (юзер): {'ОК' if r else 'ОШИБКА/истёк'}")
+    else:
+        log("⚠️ VK_USER_TOKEN не задан")
+
 def vk_upload(img_bytes):
-    if not VK_USER_TOKEN:
-        log("VK_USER_TOKEN не задан!")
-        return None
+    """v53: пробуем user-токен, затем групповой; saveWallPhoto с ретраями."""
     if not img_bytes:
         log("Нет данных картинки для загрузки!")
         return None
-
     log(f"Загрузка фото в ВК: {len(img_bytes)} байт")
     try:
         im = Image.open(io.BytesIO(img_bytes))
@@ -298,44 +307,47 @@ def vk_upload(img_bytes):
     except Exception as e:
         log(f"Ошибка проверки картинки: {e}")
 
-    srv = vk_call("photos.getWallUploadServer", {"owner_id": "-" + VK_GROUP_ID}, VK_USER_TOKEN, retries=5)
-    if not srv or "upload_url" not in srv:
-        log("Не получен upload server URL после 5 попыток")
+    tokens = []
+    if VK_USER_TOKEN:
+        tokens.append(("user", VK_USER_TOKEN))
+    if VK_TOKEN:
+        tokens.append(("group", VK_TOKEN))
+    if not tokens:
+        log("⚠️ Нет ни одного токена для загрузки фото!")
         return None
 
-    for attempt in range(3):
-        try:
-            r = requests.post(srv["upload_url"],
-                             files={"photo": ("product.jpg", img_bytes, "image/jpeg")},
-                             timeout=120)
-            r_json = r.json()
-            if not r_json.get("photo"):
-                log(f"Пустое photo в ответе (попытка {attempt+1}): {r_json}")
-                if attempt < 2:
+    for tname, tok in tokens:
+        srv = vk_call("photos.getWallUploadServer", {"owner_id": "-" + VK_GROUP_ID}, tok, retries=3)
+        if not srv or "upload_url" not in srv:
+            log(f"⚠️ upload server не получен через {tname}-токен")
+            continue
+        for attempt in range(3):
+            try:
+                r = requests.post(srv["upload_url"],
+                                  files={"photo": ("product.jpg", img_bytes, "image/jpeg")},
+                                  timeout=120)
+                r_json = r.json()
+                if not r_json.get("photo"):
+                    log(f"Пустое photo в ответе ({tname}, попытка {attempt+1}): {r_json}")
                     time.sleep(10 * (attempt + 1))
                     continue
-                return None
-
-            sp = {"owner_id": "-" + VK_GROUP_ID,
-                  "photo": r_json["photo"],
-                  "server": r_json.get("server", ""),
-                  "hash": r_json.get("hash", "")}
-
-            saved = vk_call("photos.saveWallPhoto", sp, VK_USER_TOKEN, retries=5)
-            if saved:
-                p = saved[0]
-                att = f"photo{p['owner_id']}_{p['id']}"
-                if p.get("access_key"):
-                    att += f"_{p['access_key']}"
-                log(f"Фото загружено: {att}")
-                return att
-            else:
-                log("photos.saveWallPhoto вернул None")
-                return None
-        except Exception as e:
-            log(f"Ошибка загрузки фото (попытка {attempt+1}): {e}")
-            if attempt < 2:
-                time.sleep(10 * (attempt + 1))
+                sp = {"owner_id": "-" + VK_GROUP_ID,
+                      "photo": r_json["photo"],
+                      "server": r_json.get("server", ""),
+                      "hash": r_json.get("hash", "")}
+                saved = vk_call("photos.saveWallPhoto", sp, tok, retries=3)
+                if saved:
+                    p = saved[0]
+                    att = f"photo{p['owner_id']}_{p['id']}"
+                    if p.get("access_key"):
+                        att += f"_{p['access_key']}"
+                    log(f"✅ Фото загружено через {tname}-токен: {att}")
+                    return att
+                log(f"⚠️ saveWallPhoto вернул None ({tname}, попытка {attempt+1})")
+            except Exception as e:
+                log(f"Ошибка загрузки фото ({tname}, попытка {attempt+1}): {e}")
+            time.sleep(5 * (attempt + 1))
+    log("❌ Фото загрузить не удалось ни одним токеном")
     return None
 
 def vk_post(message, att):
@@ -346,23 +358,19 @@ def vk_post(message, att):
         log(f"Attachment: {att}")
     else:
         log("Публикуем БЕЗ фото!")
-
     res = vk_call("wall.post", params, VK_TOKEN, retries=5)
     if res:
         log(f"ВК: пост опубликован: https://vk.com/wall-{VK_GROUP_ID}_{res.get('post_id')}")
         return True
-    else:
-        log("wall.post вернул None")
-        return False
+    log("wall.post вернул None")
+    return False
 
 def tg_post(img_bytes, caption):
     """ОДНО сообщение с фото. Лимит подписи Telegram = 1024 символа."""
     if not TG_BOT or not TG_CHAT:
         log("TG не настроен (нет токена или chat_id)")
         return
-
     log(f"Отправка в TG: {len(caption)} симв., фото: {len(img_bytes) if img_bytes else 0} байт")
-
     max_len = 1000
     if len(caption) > max_len:
         cut_pos = caption.rfind('.', 0, max_len)
@@ -373,7 +381,6 @@ def tg_post(img_bytes, caption):
             if cut_pos > 800:
                 caption = caption[:cut_pos]
         log(f"Текст обрезан до {len(caption)} симв. (лимит TG 1024)")
-
     if img_bytes:
         r = requests.post(f"https://api.telegram.org/bot{TG_BOT}/sendPhoto",
             data={"chat_id": TG_CHAT, "caption": caption},
@@ -381,16 +388,16 @@ def tg_post(img_bytes, caption):
     else:
         r = requests.post(f"https://api.telegram.org/bot{TG_BOT}/sendMessage",
             data={"chat_id": TG_CHAT, "text": caption}, timeout=60).json()
-
     if r.get("ok"):
         log(f"TG: отправлено в {TG_CHAT}")
     else:
         log(f"TG error: {r}")
 
 # ============================================================
-# ГЛАВНАЯ ЛОГИКА
+# ГЛАВНАЯ ЛОГИКА v53
 # ============================================================
 def main():
+    vk_health()  # v53: сразу видно, живой ли токен
     try:
         cache = json.load(open(CACHE, encoding="utf-8"))
         urls = cache.get("urls", [])
@@ -412,14 +419,12 @@ def main():
         hist = set(json.load(open(HISTORY, encoding="utf-8"))) if os.path.exists(HISTORY) else set()
     except Exception:
         hist = set()
-
     avail = [u for u in cand if u not in hist] or cand
     random.shuffle(avail)
 
     pw_ok = pw_init()
     page = title = desc = body = None
     img = None
-
     for i, u in enumerate(avail[:12]):
         if pw_ok:
             r_text = pw_get_page(u)
@@ -429,34 +434,26 @@ def main():
                 r_text = rs.text if rs.status_code == 200 else None
             except Exception:
                 r_text = None
-
         if not r_text or len(r_text) < 3000:
             continue
         if "beget=begetok" in r_text:
             log(f"Заглушка Beget на {u}")
             continue
-
         title, desc, body = parse_text(r_text)
         if not title or (len(body) + len(desc)) < 40:
             continue
-
         imgs = parse_gallery(r_text)
         img = choose_image(imgs, u) if imgs else None
-
         if img:
             img = ensure_size(img, 1000)
             page = u
             log(f"Товар: {title[:60]}")
             break
-
     pw_close()
 
     if not page:
         log("Не найдена подходящая страница")
         sys.exit(1)
-
-    hist.add(page)
-    json.dump(sorted(hist), open(HISTORY, "w", encoding="utf-8"), ensure_ascii=False)
 
     prompt = (
         f"Напиши пост о товаре для ВКонтакте, Telegram и Дзена.\n\n"
@@ -472,20 +469,19 @@ def main():
         f"6. Подчеркни применение: конференц-залы, презентации, мероприятия.\n"
         f"7. В конце: «Напишите нам в сообщения группы — расскажем подробнее».\n"
         f"8. БЕЗ хэштегов и ссылок (http, https, www, pavrus.ru).\n"
-        f"9. 🛡️ АНТИ-НЕЙРОСЛОП: ЗАПРЕЩЕНО использовать слова: 'инновационный', 'революционный', 'в современном мире', 'стоит отметить', 'важно понимать', 'безусловно', 'играет ключевую роль', 'представляет собой', 'является'. Пиши как живой эксперт-практик."
+        f"9. 🛡️ АНТИ-НЕЙРОСЛОП: ЗАПРЕЩЕНО использовать слова: 'инновационный', 'революционный', "
+        f"'в современном мире', 'стоит отметить', 'важно понимать', 'безусловно', 'играет ключевую роль', "
+        f"'представляет собой', 'является'. Пиши как живой эксперт-практик."
     )
-
     text = ai_call(prompt, 700)
     if not text:
         text = f"Современное оборудование для конференц-залов и масштабных мероприятий.\n\n{desc}\n\nНапишите нам в сообщения группы — расскажем подробнее!"
-
     text = clean_slop(text)
     text = text.replace("**", "").replace("##", "").strip()
     text = re.sub(r"^#.*\n", "", text, flags=re.M)
     text = re.sub(r"https?://\S+", "", text)
     text = re.sub(r"pavrus\.ru\S*", "", text, flags=re.I)
     text = re.sub(r"Подробнее:\s*", "", text, flags=re.I)
-
     lines = text.split('\n')
     cleaned = []
     for line in lines:
@@ -496,7 +492,6 @@ def main():
             continue
         cleaned.append(line)
     text = '\n'.join(cleaned).strip()
-
     if len(text) > 1000:
         cut_pos = text.rfind('.', 0, 1000)
         if cut_pos > 800:
@@ -505,24 +500,31 @@ def main():
             cut_pos = text.rfind(' ', 0, 1000)
             if cut_pos > 800:
                 text = text[:cut_pos]
-
     if "Напишите нам" not in text:
         text += "\n\nНапишите нам в сообщения группы — расскажем подробнее!"
-
     log(f"Текст поста: {len(text)} симв.")
 
     att = vk_upload(img) if img else None
-    log(f"Attachment для ВК: {att if att else 'None'}")
+
+    # v53: STRICT_IMAGE — пост без картинки не публикуем, URL не сжигаем
+    if not att and STRICT_IMAGE:
+        log("❌ STRICT_IMAGE: картинку загрузить не удалось — пост БЕЗ фото не публикуем, "
+            "URL остаётся в очереди на следующий запуск")
+        sys.exit(1)
 
     if vk_post(text, att):
+        # v53: история пишется ТОЛЬКО после успешной публикации
+        hist.add(page)
+        json.dump(sorted(hist), open(HISTORY, "w", encoding="utf-8"), ensure_ascii=False)
+        log(f"💾 История обновлена после успеха: {len(hist)} записей")
         log("ВК: опубликовано успешно!")
         tg_post(img, text)
     else:
-        log("ВК: публикация не удалась")
+        log("ВК: публикация не удалась (URL не помечен отправленным)")
         sys.exit(1)
 
     log("=" * 50)
-    log("FINISH: товар -> ВК + TG (один пост)")
+    log("FINISH: товар -> ВК + TG (один пост, с картинкой)")
     log("=" * 50)
 
 if __name__ == "__main__":
