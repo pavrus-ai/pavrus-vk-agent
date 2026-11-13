@@ -34,6 +34,8 @@ MIN_SOURCE = 200
 CANDIDATES_N = 15
 MAX_PER_SECTION = 3
 
+UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+      "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
 IMPERSONATES = ["chrome124", "chrome120", "safari17_0", "edge101"]
 
 GIGACHAT_CLIENT_ID = os.environ.get("GIGACHAT_CLIENT_ID1", "").strip()
@@ -49,22 +51,81 @@ RECIPIENTS = os.environ.get("RECIPIENTS", "").strip()
 def log(msg):
     print(msg, flush=True)
 
-log("Версия ℹ️ pavrus-articles-agent v43 (обход анти-бота: ротация TLS + Wayback + Jina + автопоиск кэша)")
+log("Версия ℹ️ pavrus-articles-agent v44 (headless-браузер против KillBot + все фолбэки)")
+
+def is_killbot(html):
+    return bool(html) and "killbot" in html.lower()
 
 # ============================================================
-# СЕТЬ С ОБХОДОМ АНТИ-БОТА
+# HEADLESS-БРАУЗЕР (обход JS-челленджа)
+# ============================================================
+class Browser:
+    def __init__(self):
+        self.ok = False
+        self._pw = self._br = self._ctx = None
+
+    def start(self):
+        try:
+            from playwright.sync_api import sync_playwright
+            self._pw = sync_playwright().start()
+            self._br = self._pw.chromium.launch(
+                headless=True,
+                args=["--no-sandbox", "--disable-blink-features=AutomationControlled"])
+            self._ctx = self._br.new_context(
+                user_agent=UA, locale="ru-RU",
+                viewport={"width": 1366, "height": 900})
+            self.ok = True
+            log("✅ Headless-браузер запущен (Playwright Chromium)")
+        except Exception as e:
+            log(f"⚠️ Playwright недоступен: {str(e)[:120]} — работаю без браузера")
+        return self.ok
+
+    def get(self, url, tries=3):
+        """Открывает страницу как человек и ждёт прохождения челленджа."""
+        if not self.ok:
+            return None
+        page = self._ctx.new_page()
+        html = None
+        try:
+            for i in range(tries):
+                page.goto(url, timeout=60000, wait_until="domcontentloaded")
+                for _ in range(8):                      # ждём прохождения KillBot
+                    html = page.content()
+                    if not is_killbot(html):
+                        break
+                    page.wait_for_timeout(2500)
+                if not is_killbot(html):
+                    log(f"✅ browser: {url} → {len(html)} байт (чистая страница)")
+                    return html
+                log(f"⚠️ browser попытка {i+1}: всё ещё KillBot, жду...")
+                page.wait_for_timeout(3000)
+            log(f"⚠️ browser: {url} → KillBot не отпустил")
+            return html
+        except Exception as e:
+            log(f"⚠️ browser ошибка: {str(e)[:100]}")
+            return html
+        finally:
+            try: page.close()
+            except Exception: pass
+
+    def close(self):
+        try:
+            if self._br: self._br.close()
+            if self._pw: self._pw.stop()
+        except Exception:
+            pass
+
+# ============================================================
+# ОБЫЧНЫЙ FETCH (фолбэк без браузера)
 # ============================================================
 def fetch_text(url, timeout=60):
-    """Ротация TLS-отпечатков + браузерные заголовки. Фолбэк на requests."""
     if HAS_CFFI:
         for imp in IMPERSONATES:
             try:
                 r = cffi_requests.get(url, impersonate=imp, timeout=timeout, verify=False,
-                                      headers={
-                                          "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-                                          "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
-                                          "Referer": SITE + "/",
-                                      })
+                                      headers={"Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                                               "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
+                                               "Referer": SITE + "/"})
                 log(f"✅ curl-cffi[{imp}]: {url} → статус {r.status_code}, {len(r.content)} байт")
                 if r.status_code == 200 and len(r.content) > 500:
                     return r.text
@@ -73,8 +134,7 @@ def fetch_text(url, timeout=60):
             time.sleep(1)
     try:
         r = requests.get(url, timeout=timeout, verify=False,
-                         headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-                                  "Accept-Language": "ru-RU,ru;q=0.9"})
+                         headers={"User-Agent": UA, "Accept-Language": "ru-RU,ru;q=0.9"})
         log(f"✅ requests: {url} → статус {r.status_code}, {len(r.content)} байт")
         if r.status_code == 200:
             return r.text
@@ -89,7 +149,6 @@ def parse_sitemap(xml):
     return [html_lib.unescape(u).strip() for u in locs]
 
 def extract_urls(body):
-    """Достаёт URL из sitemap, включая разбор sitemapindex (детские .xml)."""
     if not body:
         return []
     if "<loc" in body.lower():
@@ -101,11 +160,11 @@ def extract_urls(body):
             for child in children[:12]:
                 pages += [u for u in parse_sitemap(fetch_text(child)) if not u.lower().endswith(".xml")]
         return pages
-    log(f"⚠️ В ответе нет <loc> (похоже на анти-бот заглушку). Фрагмент: {body[:150]!r}")
+    log(f"⚠️ В ответе нет <loc>. Фрагмент: {body[:120]!r}")
     return []
 
 # ============================================================
-# КЭШ, СПИСКИ, АВТОПОИСК СТАРОГО КЭША
+# КЭШ И СПИСКИ
 # ============================================================
 def load_json(path, default):
     try:
@@ -119,9 +178,8 @@ def save_json(path, data):
     json.dump(data, open(path, "w", encoding="utf-8"), ensure_ascii=False, indent=1)
 
 def find_legacy_addresses():
-    """Сканирует все *.json репозитория и ищет старый список адресов pavrus.ru."""
     skip = {CACHE_FILE, SEED_FILE, FAILED_FILE, USED_FILE, HISTORY_FILE}
-    best = []
+    best, best_name = [], ""
     for path in sorted(glob.glob("*.json")):
         if path in skip:
             continue
@@ -135,47 +193,48 @@ def find_legacy_addresses():
                     cand += [x for x in v if isinstance(x, str) and x.startswith("http")]
         cand = [x for x in cand if SITE in x]
         if len(cand) > len(best):
-            best = cand
-            log(f"🔎 В файле {path} найдено адресов: {len(cand)}")
+            best, best_name = cand, path
+    if best:
+        log(f"🔎 Старый кэш найден в {best_name}: {len(best)} адресов")
     return best
 
-def get_addresses():
-    """Цепочка обхода: напрямую → Wayback → Jina → seed → автопоиск старого кэша."""
-    sources = [
-        ("напрямую", SITEMAP_URL),
-        ("wayback", f"https://web.archive.org/web/2026id_/{SITEMAP_URL}"),
-        ("wayback2", f"https://web.archive.org/web/{SITEMAP_URL}"),
-        ("jina-reader", f"https://r.jina.ai/{SITEMAP_URL}"),
-    ]
-    for label, url in sources:
-        log(f"🌐 Источники адресов: пробую {label}...")
-        urls = extract_urls(fetch_text(url))
-        urls = [u for u in urls if u.startswith(SITE)]
+def get_addresses(browser):
+    # 1) Браузером напрямую (проходит KillBot)
+    if browser.ok:
+        log("🌐 Пробую sitemap через headless-браузер...")
+        urls = [u for u in extract_urls(browser.get(SITEMAP_URL)) if u.startswith(SITE)]
         if len(urls) >= 100:
-            log(f"✅ Адреса получены через {label}: {len(urls)}")
+            log(f"✅ Адреса через браузер: {len(urls)}")
             save_json(CACHE_FILE, {"date": datetime.date.today().isoformat(), "urls": urls})
             return urls
-        log(f"⚠️ {label}: адресов {len(urls)} — мало, следующий источник")
 
+    # 2) Прежние внешние источники
+    for label, url in [("wayback", f"https://web.archive.org/web/2026id_/{SITEMAP_URL}"),
+                       ("wayback2", f"https://web.archive.org/web/{SITEMAP_URL}"),
+                       ("jina", f"https://r.jina.ai/{SITEMAP_URL}")]:
+        log(f"🌐 Пробую {label}...")
+        urls = [u for u in extract_urls(fetch_text(url)) if u.startswith(SITE)]
+        if len(urls) >= 100:
+            log(f"✅ Адреса через {label}: {len(urls)}")
+            save_json(CACHE_FILE, {"date": datetime.date.today().isoformat(), "urls": urls})
+            return urls
+        log(f"⚠️ {label}: адресов {len(urls)} — мало")
+
+    # 3) Seed и старый кэш из репозитория
     seed = load_json(SEED_FILE, [])
     if isinstance(seed, dict):
         seed = seed.get("urls", [])
     if seed:
-        log(f"✅ Беру seed-файл {SEED_FILE}: {len(seed)} адресов")
+        log(f"✅ Беру seed-файл: {len(seed)} адресов")
         return seed
-
     legacy = find_legacy_addresses()
     if legacy:
-        log(f"✅ Беру старый кэш из репозитория: {len(legacy)} адресов")
         save_json(CACHE_FILE, {"date": datetime.date.today().isoformat(), "urls": legacy})
         return legacy
-
     cache = load_json(CACHE_FILE, {})
     if cache.get("urls"):
-        log(f"⚠️ Беру последний сохранённый кэш: {len(cache['urls'])} адресов")
+        log(f"⚠️ Беру последний кэш: {len(cache['urls'])} адресов")
         return cache["urls"]
-
-    log("❌ Адреса не получены ни из одного источника")
     return []
 
 def pick_candidates(addresses):
@@ -341,9 +400,13 @@ def send_email(subject, body_text, source_url):
 # ГЛАВНЫЙ ЦИКЛ
 # ============================================================
 def main():
-    addresses = get_addresses()
+    browser = Browser()
+    browser.start()
+
+    addresses = get_addresses(browser)
     if not addresses:
         log("❌ Нет адресов — выход")
+        browser.close()
         raise SystemExit(1)
 
     candidates = pick_candidates(addresses)
@@ -353,10 +416,15 @@ def main():
 
     sent = False
     for url in candidates:
-        page = fetch_text(url)
+        page = browser.get(url) if browser.ok else fetch_text(url)
         if not page:
             continue
+        if is_killbot(page):
+            log(f"⚠️ {url}: KillBot не отпустил — пропускаю БЕЗ blacklist")
+            continue
+
         title, text, specs = extract_page(page)
+        log(f"🔎 {url}: текст {len(text)} симв., характеристик {len(specs)}")
 
         source = text
         if len(source) < MIN_SOURCE:
@@ -365,7 +433,7 @@ def main():
                 source = f"{title}. Характеристики: {specs_text}"
                 log(f"⚠️ Описания нет — собрал источник из характеристик ({len(source)} симв.)")
             else:
-                log(f"⚠️ {url}: пусто (нет ни описания, ни характеристик) → в blacklist")
+                log(f"⚠️ {url}: реально пусто → в blacklist")
                 if url not in failed_list:
                     failed_list.append(url)
                 continue
@@ -374,7 +442,7 @@ def main():
         log(f"📝 Тип текста: {kind} (источник {len(source)} симв.)")
         body = build_text(title or url.rstrip("/").split("/")[-1], source, kind)
         if not body:
-            log("⚠️ ИИ не смог уложиться в длину — пробую следующего кандидата")
+            log("⚠️ ИИ не смог уложиться в длину — следующий кандидат")
             if url not in failed_list:
                 failed_list.append(url)
             continue
@@ -387,6 +455,7 @@ def main():
             history.append({"date": datetime.date.today().isoformat(), "url": url, "kind": kind, "title": title})
             break
 
+    browser.close()
     save_json(FAILED_FILE, failed_list[-500:])
     save_json(USED_FILE, used_list[-2000:])
     save_json(HISTORY_FILE, history[-500:])
