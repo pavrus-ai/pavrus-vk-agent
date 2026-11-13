@@ -3,6 +3,8 @@ import os, re, json, glob, random, datetime, smtplib, ssl, time, html as html_li
 from urllib.parse import quote
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
+from email.mime.base import MIMEBase
+from email import encoders
 import requests
 urllib3.disable_warnings()
 
@@ -16,6 +18,11 @@ try:
     HAS_BS4 = True
 except Exception:
     HAS_BS4 = False
+try:
+    from docx import Document
+    HAS_DOCX = True
+except Exception:
+    HAS_DOCX = False
 
 SITE = "https://pavrus.ru"
 SITEMAP_URL = SITE + "/sitemap-iblock-91.xml"
@@ -27,6 +34,7 @@ HISTORY_FILE = "article_history.json"
 FEEDS = [SITE + "/upload/yandex/market.yml", SITE + "/yandex-market.xml",
          SITE + "/upload/iblock/yandex/yandex.xml", SITE + "/market.xml"]
 
+BRAND = "PAVRUS"
 ARTICLE_LEN = (2000, 2500)
 NEWS_LEN = (700, 1000)
 MIN_SOURCE = 200
@@ -42,23 +50,32 @@ GIGACHAT_CLIENT_SECRET = os.environ.get("GIGACHAT_CLIENT_SECRET1", "").strip()
 GROQ_KEY = os.environ.get("GROQ_KEY", "").strip()
 COOKIES = os.environ.get("PAVRUS_COOKIES", "").strip()
 FALLBACK_NEWS = os.environ.get("FALLBACK_NEWS", "1").strip() != "0"
-SMTP_HOST = os.environ.get("SMTP_HOST", "").strip()
-SMTP_PORT = int(os.environ.get("SMTP_PORT", "465").strip() or 465)
-SMTP_LOGIN = os.environ.get("SMTP_LOGIN", "").strip()
-SMTP_PASSWORD = os.environ.get("SMTP_PASSWORD", "").strip()
-SMTP_FROM = os.environ.get("SMTP_FROM", "").strip()
-RECIPIENTS = os.environ.get("RECIPIENTS", "").strip()
+SMTP_HOST = (os.environ.get("SMTP_HOST") or os.environ.get("SMTP_SERVER") or os.environ.get("MAIL_HOST") or "").strip()
+SMTP_PORT = int((os.environ.get("SMTP_PORT") or "465").strip() or 465)
+SMTP_LOGIN = (os.environ.get("SMTP_LOGIN") or os.environ.get("SMTP_USER") or os.environ.get("MAIL_USER") or "").strip()
+SMTP_PASSWORD = (os.environ.get("SMTP_PASSWORD") or os.environ.get("SMTP_PASS") or os.environ.get("MAIL_PASSWORD") or "").strip()
+SMTP_FROM = (os.environ.get("SMTP_FROM") or os.environ.get("MAIL_FROM") or "").strip()
+RECIPIENTS = (os.environ.get("RECIPIENTS") or os.environ.get("MAIL_TO") or os.environ.get("EMAIL_TO") or os.environ.get("RECIPIENT") or "").strip()
 
 def log(msg):
     print(msg, flush=True)
 
-log("Версия ℹ️ pavrus-articles-agent v47 (архив-первый: Wayback CDX как основной источник)")
+log("Версия ℹ️ pavrus-articles-agent v49 (вложение .docx + только бренд PAVRUS)")
+log(f"🔑 Ключи: gigachat={'ДА' if GIGACHAT_CLIENT_ID else 'НЕТ'}, "
+    f"smtp={'ДА' if (SMTP_HOST and SMTP_LOGIN and SMTP_PASSWORD) else 'НЕТ'}, "
+    f"получателей={len([r for r in RECIPIENTS.split(',') if r.strip()])}, "
+    f"docx={'ДА' if HAS_DOCX else 'НЕТ'}")
 
 def is_killbot(html):
     return bool(html) and "killbot" in html.lower()
 
+def is_pavrus_brand(url):
+    """Только товары бренда PAVRUS: метка бренда в пути URL после домена."""
+    path = url[len(SITE):] if url.startswith(SITE) else url
+    return "pavrus" in path.lower()
+
 # ============================================================
-# HEADLESS-БРАУЗЕР (опционально, только как запасной уровень)
+# HEADLESS-БРАУЗЕР (запасной уровень)
 # ============================================================
 class Browser:
     def __init__(self):
@@ -160,10 +177,9 @@ def fetch_smart(browser, url):
     return None
 
 # ============================================================
-# WAYBACK: CDX-ПУЛ И СЛЕПКИ (основной источник v47)
+# АРХИВЫ
 # ============================================================
 def wayback_cdx_pool(limit=3000):
-    """Список ВСЕХ сохранённых в архиве страниц каталога pavrus.ru."""
     try:
         q = (f"https://web.archive.org/cdx/search/cdx?url={quote(SITE.replace('https://', ''))}/catalog/*"
              f"&output=json&collapse=urlkey&filter=statuscode:200&limit={limit}&fl=original")
@@ -186,7 +202,6 @@ def wayback_cdx_pool(limit=3000):
         return []
 
 def wayback_latest(url):
-    """Последний слепок конкретной страницы (оригинал без рамки архива)."""
     try:
         q = (f"https://web.archive.org/cdx/search/cdx?url={quote(url)}"
              f"&output=json&filter=statuscode:200&fl=timestamp&limit=-1")
@@ -205,7 +220,19 @@ def wayback_latest(url):
     return None
 
 def fetch_archive_today(url):
-    body = fetch_text(f"https://archive.ph/newest/{url}", use_cookies=False)
+    target = f"https://archive.ph/newest/{url}"
+    body, final = None, target
+    if HAS_CFFI:
+        try:
+            r = cffi_requests.get(target, impersonate="chrome124", timeout=60, verify=False,
+                                  headers={"User-Agent": UA, "Accept-Language": "ru-RU,ru;q=0.9"})
+            body, final = r.text, r.url
+            log(f"✅ archive.ph: статус {r.status_code}, {len(r.content)} байт, финал: {final[:70]}")
+        except Exception as e:
+            log(f"⚠️ archive.ph: {str(e)[:80]}")
+    if body and "/newest/" in final:
+        log("⚠️ archive.ph: слепка страницы нет — пропускаю")
+        return None
     if body and len(body) > 2000 and "captcha" not in body.lower():
         log("🕰 archive.today: слепок получен")
         return body
@@ -214,26 +241,35 @@ def fetch_archive_today(url):
 def ddg_source(query):
     snippets = []
     q = f'"{query}" характеристики OR описание OR купить'
-    try:
-        if HAS_CFFI:
-            r = cffi_requests.post("https://html.duckduckgo.com/html/", data={"q": q},
-                                   impersonate="chrome124", timeout=30)
-        else:
-            r = requests.post("https://html.duckduckgo.com/html/", data={"q": q},
-                              headers={"User-Agent": UA}, timeout=30)
-        if r.status_code == 200 and HAS_BS4:
+    engines = [
+        ("ddg-html", "https://html.duckduckgo.com/html/", {"q": q}, ".result__snippet"),
+        ("ddg-lite", "https://lite.duckduckgo.com/lite/", {"q": q}, ".result-snippet, td.result-snippet"),
+        ("bing", f"https://www.bing.com/search?q={quote(q)}&setlang=ru", None, "li.b_algo p"),
+    ]
+    for name, url, data, sel in engines:
+        try:
+            if data:
+                r = (cffi_requests.post(url, data=data, impersonate="chrome124", timeout=30) if HAS_CFFI
+                     else requests.post(url, data=data, headers={"User-Agent": UA}, timeout=30))
+            else:
+                r = (cffi_requests.get(url, impersonate="chrome124", timeout=30) if HAS_CFFI
+                     else requests.get(url, headers={"User-Agent": UA}, timeout=30))
+            if r.status_code != 200 or not HAS_BS4:
+                continue
             soup = BeautifulSoup(r.text, "html.parser")
-            for s in soup.select(".result__snippet")[:8]:
+            for s in soup.select(sel)[:8]:
                 t = s.get_text(" ", strip=True)
                 if len(t) > 30:
                     snippets.append(t)
-        log(f"🔎 Сниппеты поиска для «{query}»: {len(snippets)}")
-    except Exception as e:
-        log(f"⚠️ Сниппеты ошибка: {str(e)[:80]}")
+            log(f"🔎 Сниппеты [{name}] для «{query}»: {len(snippets)}")
+            if snippets:
+                return snippets
+        except Exception as e:
+            log(f"⚠️ Сниппеты [{name}]: {str(e)[:60]}")
     return snippets
 
 # ============================================================
-# АДРЕСА, КЭШИ, СПИСКИ
+# АДРЕСА И СПИСКИ
 # ============================================================
 def parse_sitemap(xml):
     if not xml:
@@ -288,13 +324,10 @@ def find_legacy_addresses():
     return best
 
 def get_addresses(browser):
-    # 1) ОСНОВНОЙ: пул из архива Wayback (копии гарантированы)
     pool = wayback_cdx_pool()
     if len(pool) >= 50:
         save_json(CACHE_FILE, {"date": datetime.date.today().isoformat(), "urls": pool})
         return pool
-
-    # 2) Запасные: живой sitemap (браузер/куки), фиды, wayback-sitemap, seed, старый кэш
     if browser.ok:
         urls = [u for u in extract_urls(browser.get(SITEMAP_URL)) if u.startswith(SITE)]
         if len(urls) >= 100:
@@ -390,7 +423,7 @@ def slug_to_name(url):
     return name, cat
 
 # ============================================================
-# ГЕНЕРАЦИЯ
+# ГЕНЕРАЦИЯ ТЕКСТА
 # ============================================================
 _G_TOKEN, _G_EXP = None, 0
 
@@ -452,44 +485,83 @@ def build_text(title, source, kind, nospecs=False):
     if nospecs:
         prompt = (
             f"Ты — редактор блога магазина Паврус (pavrus.ru). Напиши новость-анонс на русском: "
-            f"в каталоге представлена позиция «{title}» (категория: {source}). "
+            f"в каталоге представлена позиция бренда PAVRUS «{title}» (категория: {source}). "
             f"СТРОГО {lo}–{hi} символов. ГЛАВНЫЙ ЗАПРЕТ: не выдумывай характеристики, цифры, цены — "
             f"пиши о назначении этого класса оборудования и критериях выбора в общем виде. "
+            f"Упоминай только бренд PAVRUS, никаких других брендов. "
             f"Без ссылок и штампов «в современном мире», «стоит отметить», «невероятный»."
         )
     else:
         role = "полноценную SEO-статью" if kind == "article" else "короткую новость-анонс"
         prompt = (
-            f"Ты — редактор блога интернет-магазина Паврус (pavrus.ru). Напиши {role} на русском: «{title}».\n"
+            f"Ты — редактор блога интернет-магазина Паврус (pavrus.ru). Напиши {role} на русском "
+            f"о товаре бренда PAVRUS: «{title}».\n"
             f"Источник фактов (перескажи своими словами):\n{source[:6000]}\n"
             f"Требования: 1) Объём СТРОГО {lo}–{hi} символов. "
             f"2) {'Лид, 2–3 подзаголовка, вывод.' if kind == 'article' else 'Лид, 1–2 абзаца фактов, финальная фраза.'} "
             f"3) ЗАПРЕТ штампов: «в современном мире», «стоит отметить», «данное изделие», «невероятный». "
-            f"4) Только факты из источника. 5) Без ссылок, цен, e-mail."
+            f"4) Только факты из источника. 5) Без ссылок, цен, e-mail. "
+            f"6) Упоминай только бренд PAVRUS, не сравнивай с другими брендами."
         )
     return ai_generate(prompt, int(lo * 0.9), int(hi * 1.1))
 
 # ============================================================
-# ПОЧТА
+# DOCX
 # ============================================================
-def send_email(subject, body_text, source_url):
+def make_docx(title, body, kind):
+    if not HAS_DOCX:
+        log("❌ python-docx не установлен — .docx создать невозможно")
+        return None
+    safe = re.sub(r"[^\w\-]+", "_", title).strip("_")[:80] or "article"
+    path = f"article_{datetime.date.today().isoformat()}_{safe}.docx"
+    try:
+        doc = Document()
+        doc.add_heading(title, level=1)
+        doc.add_paragraph(f"Бренд: {BRAND} | Тип: {kind} | Дата: {datetime.date.today().strftime('%d.%m.%Y')}")
+        for block in body.split("\n"):
+            block = block.strip()
+            if not block:
+                continue
+            if len(block) < 90 and not block.endswith((".", "!", "?")):
+                doc.add_heading(block, level=2)
+            else:
+                doc.add_paragraph(block)
+        doc.save(path)
+        log(f"📄 Создан файл: {path}")
+        return path
+    except Exception as e:
+        log(f"❌ Ошибка создания .docx: {e}")
+        return None
+
+# ============================================================
+# ПОЧТА С ВЛОЖЕНИЕМ
+# ============================================================
+def send_email(subject, note_text, docx_path, source_url):
     recipients = [r.strip() for r in RECIPIENTS.split(",") if r.strip()]
     if not (SMTP_HOST and SMTP_LOGIN and SMTP_PASSWORD and recipients):
         log("⚠️ SMTP не настроен — письмо не отправлено")
         return False
-    html_body = "<br>".join(body_text.split("\n")) + f"<br><br><i>Источник: {source_url}</i>"
-    msg = MIMEMultipart("alternative")
+    if not (docx_path and os.path.exists(docx_path)):
+        log("⚠️ Нет файла .docx — письмо не отправлено")
+        return False
+    msg = MIMEMultipart("mixed")
     msg["Subject"] = subject
     msg["From"] = SMTP_FROM or SMTP_LOGIN
     msg["To"] = ", ".join(recipients)
-    msg.attach(MIMEText(body_text, "plain", "utf-8"))
-    msg.attach(MIMEText(html_body, "html", "utf-8"))
+    note = note_text + f"\n\nИсточник: {source_url}"
+    msg.attach(MIMEText(note, "plain", "utf-8"))
+    with open(docx_path, "rb") as f:
+        part = MIMEBase("application", "vnd.openxmlformats-officedocument.wordprocessingml.document")
+        part.set_payload(f.read())
+    encoders.encode_base64(part)
+    part.add_header("Content-Disposition", f'attachment; filename="{os.path.basename(docx_path)}"')
+    msg.attach(part)
     try:
         ctx = ssl.create_default_context()
         with smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, context=ctx, timeout=60) as s:
             s.login(SMTP_LOGIN, SMTP_PASSWORD)
             s.sendmail(msg["From"], recipients, msg.as_string())
-        log(f"✅ Письмо отправлено: {len(recipients)} получ.")
+        log(f"✅ Письмо отправлено: {len(recipients)} получ. + вложение {os.path.basename(docx_path)}")
         return True
     except Exception as e:
         log(f"⚠️ SMTP ошибка: {e}")
@@ -503,8 +575,11 @@ def main():
     browser.start()
 
     addresses = get_addresses(browser)
+    # ФИЛЬТР БРЕНДА: только товары PAVRUS
+    addresses = [u for u in addresses if is_pavrus_brand(u)]
+    log(f"🏷 После фильтра бренда PAVRUS: {len(addresses)} адресов")
     if not addresses:
-        log("❌ Нет адресов — выход")
+        log("❌ Нет адресов бренда PAVRUS — выход")
         browser.close()
         raise SystemExit(1)
 
@@ -513,18 +588,19 @@ def main():
     used_list = load_json(USED_FILE, [])
     history = load_json(HISTORY_FILE, [])
 
+    live_dead = False
     sent = False
     for url in candidates:
         name0, cat0 = slug_to_name(url)
 
-        # 1) Архив Wayback — основной источник (KillBot не участвует)
         page = wayback_latest(url)
         label = "wayback"
-        # 2) Живой сайт (вдруг KillBot отпустит)
-        if not page:
+        if not page and not live_dead:
             page = fetch_smart(browser, url)
             label = "live"
-        # 3) archive.today
+            if page is None:
+                live_dead = True
+                log("⚠️ Живой сайт закрыт KillBot — больше не дёргаю его в этом запуске")
         if not page or is_killbot(page):
             page = fetch_archive_today(url)
             label = "archive.today"
@@ -560,7 +636,14 @@ def main():
             log("⚠️ ИИ не уложился в длину — следующий кандидат")
             continue
 
-        if send_email(f"Статья для pavrus.ru: {title or name0}"[:120], body, url):
+        docx_path = make_docx(title or name0, body, kind)
+        if not docx_path:
+            continue
+
+        note = (f"Добрый день!\n\nВо вложении — новая {('статья' if kind == 'article' else 'новость')} "
+                f"для сайта pavrus.ru.\nТема: {title or name0}\nБренд: {BRAND}\n"
+                f"\n— Агент статей Паврус (автоматическая отправка)")
+        if send_email(f"Статья для pavrus.ru: {title or name0}"[:120], note, docx_path, url):
             sent = True
             if url not in used_list:
                 used_list.append(url)
