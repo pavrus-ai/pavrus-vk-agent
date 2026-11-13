@@ -2,20 +2,22 @@ name: Pavrus Articles Agent
 
 on:
   schedule:
-    - cron: "0 6 * * *"     # 09:00 МСК
-  workflow_dispatch:
+    - cron: "0 6 * * *"     # 09:00 МСК ежедневно
+    # Для двух статей в день раскомментируйте:
+    # - cron: "0 6,15 * * *"
+  workflow_dispatch:         # ручной запуск кнопкой Run workflow
 
 permissions:
-  contents: write
+  contents: write            # нужно для коммита кэшей и истории
 
 concurrency:
   group: articles-agent
-  cancel-in-progress: false
+  cancel-in-progress: false  # не прерывать идущий запуск
 
 jobs:
   article:
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 25      # Wayback CDX и слепки бывают медленными
 
     steps:
       - name: Оформить репо
@@ -29,26 +31,38 @@ jobs:
           python-version: "3.11"
 
       - name: Установка зависимостей
-        run: pip install --upgrade pip && pip install requests curl_cffi beautifulsoup4
+        # ИСПРАВЛЕНИЕ v49: добавлен python-docx для вложений,
+        # убран playwright — живой сайт закрыт KillBot по IP,
+        # агент работает через Wayback-архив.
+        run: |
+          pip install --upgrade pip
+          pip install requests curl_cffi beautifulsoup4 python-docx
 
       - name: Запустите pavrus-articles-agent
         env:
+          # --- ИИ-генерация текста ---
           GIGACHAT_CLIENT_ID1: ${{ secrets.GIGACHAT_CLIENT_ID1 }}
           GIGACHAT_CLIENT_SECRET1: ${{ secrets.GIGACHAT_CLIENT_SECRET1 }}
           GROQ_KEY: ${{ secrets.GROQ_KEY }}
+
+          # --- Опционально (живой сайт всё равно закрыт KillBot) ---
           PAVRUS_COOKIES: ${{ secrets.PAVRUS_COOKIES }}
           FALLBACK_NEWS: "1"
-          # --- ПОЧТА: маппинг ВАШИХ имён секретов ---
+
+          # --- ПОЧТА: маппинг ВАШИХ имён секретов на переменные кода ---
+          # Код v49 читает: SMTP_HOST / SMTP_PORT / SMTP_LOGIN /
+          # SMTP_PASSWORD / SMTP_FROM / RECIPIENTS
           SMTP_HOST: ${{ secrets.SMTP_HOST }}
-          SMTP_PORT: ${{ secrets.SMTP_PORT || '465' }}
+          SMTP_PORT: ${{ secrets.SMTP_PORT }}
           SMTP_LOGIN: ${{ secrets.SMTP_USER }}        # ваш секрет SMTP_USER
           SMTP_PASSWORD: ${{ secrets.SMTP_PASS }}     # ваш секрет SMTP_PASS
-          SMTP_FROM: ${{ secrets.SMTP_USER }}         # отправитель = логин (обычно это e-mail)
+          SMTP_FROM: ${{ secrets.SMTP_USER }}         # отправитель = логин
           RECIPIENTS: ${{ secrets.EMAIL_TO }}         # ваш секрет EMAIL_TO
+
         run: python pavrus-articles-agent.py
 
       - name: Зафиксировать обновленный кэш и историю
-        if: always()
+        if: always()              # выполняется даже при падении агента
         continue-on-error: true
         run: |
           git config user.name "github-actions[bot]"
