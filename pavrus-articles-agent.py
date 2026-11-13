@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-import os, re, json, random, datetime, smtplib, ssl, time, html as html_lib, urllib3
+import os, re, json, glob, random, datetime, smtplib, ssl, time, html as html_lib, urllib3, base64, uuid
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 import requests
@@ -23,15 +23,18 @@ except Exception:
 SITE = "https://pavrus.ru"
 SITEMAP_URL = SITE + "/sitemap-iblock-91.xml"
 CACHE_FILE = "addresses_cache.json"
+SEED_FILE = "addresses_seed.json"
 FAILED_FILE = "failed_urls.json"
 USED_FILE = "used_urls.json"
 HISTORY_FILE = "article_history.json"
 
 ARTICLE_LEN = (2000, 2500)
 NEWS_LEN = (700, 1000)
-MIN_SOURCE = 200          # минимум символов источника, иначе карточка "пустая"
-CANDIDATES_N = 15         # было 5 — стало 15
-MAX_PER_SECTION = 3       # не больше 3 URL из одного раздела каталога
+MIN_SOURCE = 200
+CANDIDATES_N = 15
+MAX_PER_SECTION = 3
+
+IMPERSONATES = ["chrome124", "chrome120", "safari17_0", "edge101"]
 
 GIGACHAT_CLIENT_ID = os.environ.get("GIGACHAT_CLIENT_ID1", "").strip()
 GIGACHAT_CLIENT_SECRET = os.environ.get("GIGACHAT_CLIENT_SECRET1", "").strip()
@@ -46,39 +49,165 @@ RECIPIENTS = os.environ.get("RECIPIENTS", "").strip()
 def log(msg):
     print(msg, flush=True)
 
-log("Версия ℹ️ pavrus-articles-agent v42 (свежий sitemap + случайные кандидаты + blacklist + specs-fallback)")
+log("Версия ℹ️ pavrus-articles-agent v43 (обход анти-бота: ротация TLS + Wayback + Jina + автопоиск кэша)")
 
 # ============================================================
-# СЕТЬ И ПАРСИНГ
+# СЕТЬ С ОБХОДОМ АНТИ-БОТА
 # ============================================================
-def fetch(url, timeout=60):
+def fetch_text(url, timeout=60):
+    """Ротация TLS-отпечатков + браузерные заголовки. Фолбэк на requests."""
     if HAS_CFFI:
-        try:
-            r = cffi_requests.get(url, impersonate="chrome120", timeout=timeout, verify=False)
-            log(f"✅ curl-cffi: {url} → статус {r.status_code}, {len(r.content)} байт")
-            return r.text if r.status_code == 200 else None
-        except Exception as e:
-            log(f"⚠️ curl-cffi ошибка: {str(e)[:100]}")
+        for imp in IMPERSONATES:
+            try:
+                r = cffi_requests.get(url, impersonate=imp, timeout=timeout, verify=False,
+                                      headers={
+                                          "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                                          "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
+                                          "Referer": SITE + "/",
+                                      })
+                log(f"✅ curl-cffi[{imp}]: {url} → статус {r.status_code}, {len(r.content)} байт")
+                if r.status_code == 200 and len(r.content) > 500:
+                    return r.text
+            except Exception as e:
+                log(f"⚠️ curl-cffi[{imp}] ошибка: {str(e)[:80]}")
+            time.sleep(1)
     try:
         r = requests.get(url, timeout=timeout, verify=False,
-                         headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
+                         headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                                  "Accept-Language": "ru-RU,ru;q=0.9"})
         log(f"✅ requests: {url} → статус {r.status_code}, {len(r.content)} байт")
-        return r.text if r.status_code == 200 else None
+        if r.status_code == 200:
+            return r.text
     except Exception as e:
-        log(f"⚠️ requests ошибка: {str(e)[:100]}")
-        return None
+        log(f"⚠️ requests ошибка: {str(e)[:80]}")
+    return None
 
+def parse_sitemap(xml):
+    if not xml:
+        return []
+    locs = re.findall(r"<loc[^>]*>\s*(.*?)\s*</loc>", xml, re.S)
+    return [html_lib.unescape(u).strip() for u in locs]
+
+def extract_urls(body):
+    """Достаёт URL из sitemap, включая разбор sitemapindex (детские .xml)."""
+    if not body:
+        return []
+    if "<loc" in body.lower():
+        locs = parse_sitemap(body)
+        pages = [u for u in locs if not u.lower().endswith(".xml")]
+        children = [u for u in locs if u.lower().endswith(".xml")]
+        if len(pages) < 100 and children:
+            log(f" Sitemapindex: обхожу {min(len(children), 12)} дочерних карт...")
+            for child in children[:12]:
+                pages += [u for u in parse_sitemap(fetch_text(child)) if not u.lower().endswith(".xml")]
+        return pages
+    log(f"⚠️ В ответе нет <loc> (похоже на анти-бот заглушку). Фрагмент: {body[:150]!r}")
+    return []
+
+# ============================================================
+# КЭШ, СПИСКИ, АВТОПОИСК СТАРОГО КЭША
+# ============================================================
+def load_json(path, default):
+    try:
+        if os.path.exists(path):
+            return json.load(open(path, encoding="utf-8"))
+    except Exception:
+        pass
+    return default
+
+def save_json(path, data):
+    json.dump(data, open(path, "w", encoding="utf-8"), ensure_ascii=False, indent=1)
+
+def find_legacy_addresses():
+    """Сканирует все *.json репозитория и ищет старый список адресов pavrus.ru."""
+    skip = {CACHE_FILE, SEED_FILE, FAILED_FILE, USED_FILE, HISTORY_FILE}
+    best = []
+    for path in sorted(glob.glob("*.json")):
+        if path in skip:
+            continue
+        data = load_json(path, None)
+        cand = []
+        if isinstance(data, list):
+            cand = [x for x in data if isinstance(x, str) and x.startswith("http")]
+        elif isinstance(data, dict):
+            for v in data.values():
+                if isinstance(v, list):
+                    cand += [x for x in v if isinstance(x, str) and x.startswith("http")]
+        cand = [x for x in cand if SITE in x]
+        if len(cand) > len(best):
+            best = cand
+            log(f"🔎 В файле {path} найдено адресов: {len(cand)}")
+    return best
+
+def get_addresses():
+    """Цепочка обхода: напрямую → Wayback → Jina → seed → автопоиск старого кэша."""
+    sources = [
+        ("напрямую", SITEMAP_URL),
+        ("wayback", f"https://web.archive.org/web/2026id_/{SITEMAP_URL}"),
+        ("wayback2", f"https://web.archive.org/web/{SITEMAP_URL}"),
+        ("jina-reader", f"https://r.jina.ai/{SITEMAP_URL}"),
+    ]
+    for label, url in sources:
+        log(f"🌐 Источники адресов: пробую {label}...")
+        urls = extract_urls(fetch_text(url))
+        urls = [u for u in urls if u.startswith(SITE)]
+        if len(urls) >= 100:
+            log(f"✅ Адреса получены через {label}: {len(urls)}")
+            save_json(CACHE_FILE, {"date": datetime.date.today().isoformat(), "urls": urls})
+            return urls
+        log(f"⚠️ {label}: адресов {len(urls)} — мало, следующий источник")
+
+    seed = load_json(SEED_FILE, [])
+    if isinstance(seed, dict):
+        seed = seed.get("urls", [])
+    if seed:
+        log(f"✅ Беру seed-файл {SEED_FILE}: {len(seed)} адресов")
+        return seed
+
+    legacy = find_legacy_addresses()
+    if legacy:
+        log(f"✅ Беру старый кэш из репозитория: {len(legacy)} адресов")
+        save_json(CACHE_FILE, {"date": datetime.date.today().isoformat(), "urls": legacy})
+        return legacy
+
+    cache = load_json(CACHE_FILE, {})
+    if cache.get("urls"):
+        log(f"⚠️ Беру последний сохранённый кэш: {len(cache['urls'])} адресов")
+        return cache["urls"]
+
+    log("❌ Адреса не получены ни из одного источника")
+    return []
+
+def pick_candidates(addresses):
+    failed = set(load_json(FAILED_FILE, []))
+    used = set(load_json(USED_FILE, []))
+    pool = [u for u in addresses if u not in failed and u not in used]
+    if len(pool) < CANDIDATES_N:
+        pool = [u for u in addresses if u not in failed]
+    random.shuffle(pool)
+    picked, per_sec = [], {}
+    for u in pool:
+        sec = "/".join(u.split("/")[:6])
+        per_sec[sec] = per_sec.get(sec, 0) + 1
+        if per_sec[sec] <= MAX_PER_SECTION:
+            picked.append(u)
+        if len(picked) >= CANDIDATES_N:
+            break
+    log(f"🎲 Кандидаты ({len(picked)}):")
+    for i, u in enumerate(picked, 1):
+        log(f"   {i}. {u}")
+    return picked
+
+# ============================================================
+# ПАРСИНГ СТРАНИЦЫ
+# ============================================================
 def clean(s):
     s = re.sub(r"<(script|style)[^>]*>.*?</\1>", " ", s, flags=re.S | re.I)
     s = re.sub(r"<[^>]+>", " ", s)
     s = html_lib.unescape(s)
     return re.sub(r"\s+", " ", s).strip()
 
-def parse_sitemap(xml):
-    return re.findall(r"<loc>\s*(.*?)\s*</loc>", xml or "", re.S)
-
 def extract_page(html):
-    """Возвращает (title, text, specs). specs — строки таблиц характеристик."""
     title, text_parts, specs = "", [], []
     if HAS_BS4:
         soup = BeautifulSoup(html, "html.parser")
@@ -111,58 +240,7 @@ def extract_page(html):
     return title, " ".join(text_parts).strip(), specs
 
 # ============================================================
-# КЭШ АДРЕСОВ И ЧЁРНЫЕ СПИСКИ
-# ============================================================
-def load_json(path, default):
-    try:
-        if os.path.exists(path):
-            return json.load(open(path, encoding="utf-8"))
-    except Exception:
-        pass
-    return default
-
-def save_json(path, data):
-    json.dump(data, open(path, "w", encoding="utf-8"), ensure_ascii=False, indent=1)
-
-def get_addresses():
-    """СВЕЖИЙ sitemap — основной источник. Кэш — только аварийный."""
-    xml = fetch(SITEMAP_URL)
-    urls = parse_sitemap(xml)
-    if len(urls) > 100:
-        save_json(CACHE_FILE, {"date": datetime.date.today().isoformat(), "urls": urls})
-        log(f"✅ Пул из СВЕЖЕГО sitemap: {len(urls)} адресов")
-        return urls
-    cache = load_json(CACHE_FILE, {})
-    urls = cache.get("urls", [])
-    age = "неизвестен"
-    if cache.get("date"):
-        age = (datetime.date.today() - datetime.date.fromisoformat(cache["date"])).days
-    log(f"⚠️ Sitemap не распознан, беру кэш: {len(urls)} адресов, возраст {age} дн.")
-    return urls
-
-def pick_candidates(addresses):
-    """Настоящий случайный выбор: весь пул минус used/failed, ротация разделов."""
-    failed = set(load_json(FAILED_FILE, []))
-    used = set(load_json(USED_FILE, []))
-    pool = [u for u in addresses if u not in failed and u not in used]
-    if len(pool) < CANDIDATES_N:
-        pool = [u for u in addresses if u not in failed]   # второй круг: reused разрешён
-    random.shuffle(pool)
-    picked, per_sec = [], {}
-    for u in pool:
-        sec = "/".join(u.split("/")[:6])
-        per_sec[sec] = per_sec.get(sec, 0) + 1
-        if per_sec[sec] <= MAX_PER_SECTION:
-            picked.append(u)
-        if len(picked) >= CANDIDATES_N:
-            break
-    log(f"🎲 Кандидаты ({len(picked)}):")
-    for i, u in enumerate(picked, 1):
-        log(f"   {i}. {u}")
-    return picked
-
-# ============================================================
-# ГЕНЕРАЦИЯ ТЕКСТА (GigaChat → Groq)
+# ГЕНЕРАЦИЯ ТЕКСТА
 # ============================================================
 _G_TOKEN, _G_EXP = None, 0
 
@@ -173,9 +251,9 @@ def gigachat_token():
     if _G_TOKEN and time.time() < _G_EXP:
         return _G_TOKEN
     try:
-        cred = __import__("base64").b64encode(f"{GIGACHAT_CLIENT_ID}:{GIGACHAT_CLIENT_SECRET}".encode()).decode()
+        cred = base64.b64encode(f"{GIGACHAT_CLIENT_ID}:{GIGACHAT_CLIENT_SECRET}".encode()).decode()
         r = requests.post("https://ngw.devices.sberbank.ru:9443/api/v2/oauth",
-                          headers={"Authorization": f"Basic {cred}", "RqUID": str(__import__("uuid").uuid4()),
+                          headers={"Authorization": f"Basic {cred}", "RqUID": str(uuid.uuid4()),
                                    "Content-Type": "application/x-www-form-urlencoded"},
                           data={"scope": "GIGACHAT_API_PERS"}, timeout=30, verify=False)
         if r.status_code == 200 and "access_token" in r.json():
@@ -275,14 +353,13 @@ def main():
 
     sent = False
     for url in candidates:
-        page = fetch(url)
+        page = fetch_text(url)
         if not page:
             continue
         title, text, specs = extract_page(page)
 
         source = text
         if len(source) < MIN_SOURCE:
-            # СПАСЕНИЕ: собираем источник из таблицы характеристик
             specs_text = "; ".join(specs)
             if len(specs_text) >= MIN_SOURCE:
                 source = f"{title}. Характеристики: {specs_text}"
@@ -291,7 +368,7 @@ def main():
                 log(f"⚠️ {url}: пусто (нет ни описания, ни характеристик) → в blacklist")
                 if url not in failed_list:
                     failed_list.append(url)
-                continue   # не тратим попытку — берём следующего кандидата
+                continue
 
         kind = "article" if len(source) >= 600 else "news"
         log(f"📝 Тип текста: {kind} (источник {len(source)} симв.)")
