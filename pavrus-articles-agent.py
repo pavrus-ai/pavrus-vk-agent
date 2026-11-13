@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 import os, re, json, glob, random, datetime, smtplib, ssl, time, html as html_lib, urllib3, base64, uuid
+from urllib.parse import quote
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 import requests
@@ -39,8 +40,8 @@ IMPERSONATES = ["chrome124", "chrome120", "safari17_0", "edge101"]
 GIGACHAT_CLIENT_ID = os.environ.get("GIGACHAT_CLIENT_ID1", "").strip()
 GIGACHAT_CLIENT_SECRET = os.environ.get("GIGACHAT_CLIENT_SECRET1", "").strip()
 GROQ_KEY = os.environ.get("GROQ_KEY", "").strip()
-COOKIES = os.environ.get("PAVRUS_COOKIES", "").strip()          # НОВОЕ: куки от KillBot
-FALLBACK_NEWS = os.environ.get("FALLBACK_NEWS", "1").strip() != "0"  # НОВОЕ: анонс по названию
+COOKIES = os.environ.get("PAVRUS_COOKIES", "").strip()
+FALLBACK_NEWS = os.environ.get("FALLBACK_NEWS", "1").strip() != "0"
 SMTP_HOST = os.environ.get("SMTP_HOST", "").strip()
 SMTP_PORT = int(os.environ.get("SMTP_PORT", "465").strip() or 465)
 SMTP_LOGIN = os.environ.get("SMTP_LOGIN", "").strip()
@@ -51,13 +52,13 @@ RECIPIENTS = os.environ.get("RECIPIENTS", "").strip()
 def log(msg):
     print(msg, flush=True)
 
-log("Версия ℹ️ pavrus-articles-agent v45 (куки против KillBot + YML-фиды + анонс по названию)")
+log("Версия ℹ️ pavrus-articles-agent v47 (архив-первый: Wayback CDX как основной источник)")
 
 def is_killbot(html):
     return bool(html) and "killbot" in html.lower()
 
 # ============================================================
-# HEADLESS-БРАУЗЕР
+# HEADLESS-БРАУЗЕР (опционально, только как запасной уровень)
 # ============================================================
 class Browser:
     def __init__(self):
@@ -79,14 +80,13 @@ class Browser:
                         k, v = part.strip().split("=", 1)
                         ck.append({"name": k, "value": v, "domain": ".pavrus.ru", "path": "/"})
                 self._ctx.add_cookies(ck)
-                log(f"✅ Браузер: добавлено кук: {len(ck)}")
             self.ok = True
             log("✅ Headless-браузер запущен")
         except Exception as e:
             log(f"⚠️ Playwright недоступен: {str(e)[:120]}")
         return self.ok
 
-    def get(self, url, tries=3):
+    def get(self, url, tries=2):
         if not self.ok:
             return None
         page = self._ctx.new_page()
@@ -94,13 +94,12 @@ class Browser:
         try:
             for i in range(tries):
                 page.goto(url, timeout=60000, wait_until="domcontentloaded")
-                for _ in range(8):
+                for _ in range(6):
                     html = page.content()
                     if not is_killbot(html):
                         break
                     page.wait_for_timeout(2500)
                 if not is_killbot(html):
-                    log(f"✅ browser: {url} → чистая страница")
                     return html
                 page.wait_for_timeout(3000)
             return html
@@ -119,7 +118,7 @@ class Browser:
             pass
 
 # ============================================================
-# FETCH С КУКАМИ
+# FETCH
 # ============================================================
 def fetch_text(url, timeout=60, use_cookies=True):
     hdr = {"Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
@@ -131,16 +130,15 @@ def fetch_text(url, timeout=60, use_cookies=True):
         for imp in IMPERSONATES:
             try:
                 r = cffi_requests.get(url, impersonate=imp, timeout=timeout, verify=False, headers=hdr)
-                log(f"✅ curl-cffi[{imp}]: {url} → статус {r.status_code}, {len(r.content)} байт")
+                log(f"✅ curl-cffi[{imp}]: {url[:80]} → статус {r.status_code}, {len(r.content)} байт")
                 if r.status_code == 200 and len(r.content) > 500:
                     return r.text
             except Exception as e:
                 log(f"⚠️ curl-cffi[{imp}] ошибка: {str(e)[:80]}")
             time.sleep(1)
     try:
-        r = requests.get(url, timeout=timeout, verify=False,
-                         headers=dict(hdr, **{"User-Agent": UA}))
-        log(f"✅ requests: {url} → статус {r.status_code}, {len(r.content)} байт")
+        r = requests.get(url, timeout=timeout, verify=False, headers=dict(hdr, **{"User-Agent": UA}))
+        log(f"✅ requests: {url[:80]} → статус {r.status_code}, {len(r.content)} байт")
         if r.status_code == 200:
             return r.text
     except Exception as e:
@@ -148,7 +146,6 @@ def fetch_text(url, timeout=60, use_cookies=True):
     return None
 
 def fetch_smart(browser, url):
-    """Куки → браузер → без кук. Возвращает чистую страницу или None."""
     if COOKIES:
         p = fetch_text(url)
         if p and not is_killbot(p):
@@ -162,6 +159,82 @@ def fetch_smart(browser, url):
         return p
     return None
 
+# ============================================================
+# WAYBACK: CDX-ПУЛ И СЛЕПКИ (основной источник v47)
+# ============================================================
+def wayback_cdx_pool(limit=3000):
+    """Список ВСЕХ сохранённых в архиве страниц каталога pavrus.ru."""
+    try:
+        q = (f"https://web.archive.org/cdx/search/cdx?url={quote(SITE.replace('https://', ''))}/catalog/*"
+             f"&output=json&collapse=urlkey&filter=statuscode:200&limit={limit}&fl=original")
+        r = requests.get(q, timeout=180)
+        rows = r.json()[1:]
+        urls = []
+        for row in rows:
+            if not row or not row[0]:
+                continue
+            u = html_lib.unescape(row[0])
+            if not u.startswith("http"):
+                u = "https://" + u
+            u = u.replace("http://", "https://", 1)
+            if u.startswith(SITE):
+                urls.append(u)
+        log(f"🕰 Wayback CDX: сохранённых страниц каталога: {len(urls)}")
+        return urls
+    except Exception as e:
+        log(f"⚠️ CDX ошибка: {str(e)[:100]}")
+        return []
+
+def wayback_latest(url):
+    """Последний слепок конкретной страницы (оригинал без рамки архива)."""
+    try:
+        q = (f"https://web.archive.org/cdx/search/cdx?url={quote(url)}"
+             f"&output=json&filter=statuscode:200&fl=timestamp&limit=-1")
+        r = requests.get(q, timeout=60)
+        rows = r.json()[1:]
+        if not rows:
+            return None
+        ts = rows[-1][0]
+        snap = f"https://web.archive.org/web/{ts}id_/{url}"
+        body = fetch_text(snap, use_cookies=False, timeout=90)
+        if body and len(body) > 2000 and not is_killbot(body):
+            log(f"🕰 Wayback слепок {ts}: {url[:70]}")
+            return body
+    except Exception as e:
+        log(f"⚠️ wayback_latest: {str(e)[:80]}")
+    return None
+
+def fetch_archive_today(url):
+    body = fetch_text(f"https://archive.ph/newest/{url}", use_cookies=False)
+    if body and len(body) > 2000 and "captcha" not in body.lower():
+        log("🕰 archive.today: слепок получен")
+        return body
+    return None
+
+def ddg_source(query):
+    snippets = []
+    q = f'"{query}" характеристики OR описание OR купить'
+    try:
+        if HAS_CFFI:
+            r = cffi_requests.post("https://html.duckduckgo.com/html/", data={"q": q},
+                                   impersonate="chrome124", timeout=30)
+        else:
+            r = requests.post("https://html.duckduckgo.com/html/", data={"q": q},
+                              headers={"User-Agent": UA}, timeout=30)
+        if r.status_code == 200 and HAS_BS4:
+            soup = BeautifulSoup(r.text, "html.parser")
+            for s in soup.select(".result__snippet")[:8]:
+                t = s.get_text(" ", strip=True)
+                if len(t) > 30:
+                    snippets.append(t)
+        log(f"🔎 Сниппеты поиска для «{query}»: {len(snippets)}")
+    except Exception as e:
+        log(f"⚠️ Сниппеты ошибка: {str(e)[:80]}")
+    return snippets
+
+# ============================================================
+# АДРЕСА, КЭШИ, СПИСКИ
+# ============================================================
 def parse_sitemap(xml):
     if not xml:
         return []
@@ -178,13 +251,10 @@ def extract_urls(body):
             for child in children[:12]:
                 pages += [u for u in parse_sitemap(fetch_text(child)) if not u.lower().endswith(".xml")]
         return pages
-    if "<url>" in body.lower():   # YML-фид маркета
+    if "<url>" in body.lower():
         return re.findall(r"<url>\s*(.*?)\s*</url>", body, re.S)
     return []
 
-# ============================================================
-# КЭШ И СПИСКИ
-# ============================================================
 def load_json(path, default):
     try:
         if os.path.exists(path):
@@ -218,46 +288,41 @@ def find_legacy_addresses():
     return best
 
 def get_addresses(browser):
+    # 1) ОСНОВНОЙ: пул из архива Wayback (копии гарантированы)
+    pool = wayback_cdx_pool()
+    if len(pool) >= 50:
+        save_json(CACHE_FILE, {"date": datetime.date.today().isoformat(), "urls": pool})
+        return pool
+
+    # 2) Запасные: живой sitemap (браузер/куки), фиды, wayback-sitemap, seed, старый кэш
     if browser.ok:
-        log("🌐 Sitemap через headless-браузер...")
         urls = [u for u in extract_urls(browser.get(SITEMAP_URL)) if u.startswith(SITE)]
         if len(urls) >= 100:
             save_json(CACHE_FILE, {"date": datetime.date.today().isoformat(), "urls": urls})
             log(f"✅ Адреса через браузер: {len(urls)}")
             return urls
     if COOKIES:
-        log("🌐 Sitemap с куками...")
         urls = [u for u in extract_urls(fetch_text(SITEMAP_URL)) if u.startswith(SITE)]
         if len(urls) >= 100:
             save_json(CACHE_FILE, {"date": datetime.date.today().isoformat(), "urls": urls})
             log(f"✅ Адреса с куками: {len(urls)}")
             return urls
     for f in FEEDS:
-        log(f"🌐 Пробую YML-фид: {f}")
         urls = [u for u in extract_urls(fetch_text(f)) if u.startswith(SITE)]
         if len(urls) >= 100:
             save_json(CACHE_FILE, {"date": datetime.date.today().isoformat(), "urls": urls})
             log(f"✅ Адреса из фида: {len(urls)}")
             return urls
-    for label, url in [("wayback", f"https://web.archive.org/web/2026id_/{SITEMAP_URL}"),
-                       ("jina", f"https://r.jina.ai/{SITEMAP_URL}")]:
-        urls = [u for u in extract_urls(fetch_text(url, use_cookies=False)) if u.startswith(SITE)]
-        if len(urls) >= 100:
-            save_json(CACHE_FILE, {"date": datetime.date.today().isoformat(), "urls": urls})
-            log(f"✅ Адреса через {label}: {len(urls)}")
-            return urls
     seed = load_json(SEED_FILE, [])
     if isinstance(seed, dict):
         seed = seed.get("urls", [])
     if seed:
-        log(f"✅ Seed-файл: {len(seed)} адресов")
         return seed
     legacy = find_legacy_addresses()
     if legacy:
         save_json(CACHE_FILE, {"date": datetime.date.today().isoformat(), "urls": legacy})
         return legacy
-    cache = load_json(CACHE_FILE, {})
-    return cache.get("urls", [])
+    return load_json(CACHE_FILE, {}).get("urls", [])
 
 def pick_candidates(addresses):
     failed = set(load_json(FAILED_FILE, []))
@@ -388,9 +453,9 @@ def build_text(title, source, kind, nospecs=False):
         prompt = (
             f"Ты — редактор блога магазина Паврус (pavrus.ru). Напиши новость-анонс на русском: "
             f"в каталоге представлена позиция «{title}» (категория: {source}). "
-            f"СТРОГО {lo}–{hi} символов. ГЛАВНЫЙ ЗАПРЕТ: не выдумывай характеристики, цифры, цены, "
-            f"комплектацию — пиши только о назначении этого класса оборудования и критериях выбора в общем виде. "
-            f"Без ссылок, без штампов «в современном мире», «стоит отметить», «невероятный»."
+            f"СТРОГО {lo}–{hi} символов. ГЛАВНЫЙ ЗАПРЕТ: не выдумывай характеристики, цифры, цены — "
+            f"пиши о назначении этого класса оборудования и критериях выбора в общем виде. "
+            f"Без ссылок и штампов «в современном мире», «стоит отметить», «невероятный»."
         )
     else:
         role = "полноценную SEO-статью" if kind == "article" else "короткую новость-анонс"
@@ -450,41 +515,57 @@ def main():
 
     sent = False
     for url in candidates:
-        page = fetch_smart(browser, url)
+        name0, cat0 = slug_to_name(url)
+
+        # 1) Архив Wayback — основной источник (KillBot не участвует)
+        page = wayback_latest(url)
+        label = "wayback"
+        # 2) Живой сайт (вдруг KillBot отпустит)
+        if not page:
+            page = fetch_smart(browser, url)
+            label = "live"
+        # 3) archive.today
+        if not page or is_killbot(page):
+            page = fetch_archive_today(url)
+            label = "archive.today"
+
         title, text, specs = "", "", []
-        if page:
+        if page and not is_killbot(page):
             title, text, specs = extract_page(page)
-            log(f"🔎 {url}: текст {len(text)} симв., характеристик {len(specs)}")
+            log(f"🔎 [{label}] {url}: текст {len(text)} симв., характеристик {len(specs)}")
 
         source = text
         nospecs = False
+        if len(source) < MIN_SOURCE and specs:
+            source = f"{title}. Характеристики: " + "; ".join(specs)
         if len(source) < MIN_SOURCE:
-            specs_text = "; ".join(specs)
-            if len(specs_text) >= MIN_SOURCE:
-                source = f"{title}. Характеристики: {specs_text}"
-            elif FALLBACK_NEWS:
-                name, cat = slug_to_name(url)
-                log(f"⚠️ Страница недоступна (KillBot/пусто) → анонс по названию: «{name}»")
-                title, source, nospecs = name, cat, True
+            snips = ddg_source(title or name0)
+            if snips:
+                source = f"{title or name0}. По данным открытых источников: " + " ".join(snips)
+                label += "+snippets"
+        if len(source) < MIN_SOURCE:
+            if FALLBACK_NEWS:
+                log(f"⚠️ Ни одной копии не найдено → анонс по названию: «{name0}»")
+                title, source, nospecs = name0, cat0, True
+                label = "name-fallback"
             else:
                 if url not in failed_list:
                     failed_list.append(url)
                 continue
 
         kind = "article" if (len(source) >= 600 and not nospecs) else "news"
-        body = build_text(title or url.rstrip("/").split("/")[-1], source, kind, nospecs=nospecs)
+        log(f"📝 Источник: {label} | тип: {kind} | {len(source)} симв.")
+        body = build_text(title or name0, source, kind, nospecs=nospecs)
         if not body:
             log("⚠️ ИИ не уложился в длину — следующий кандидат")
-            if url not in failed_list and not nospecs:
-                failed_list.append(url)
             continue
 
-        if send_email(f"Статья для pavrus.ru: {title or url}"[:120], body, url):
+        if send_email(f"Статья для pavrus.ru: {title or name0}"[:120], body, url):
             sent = True
             if url not in used_list:
                 used_list.append(url)
             history.append({"date": datetime.date.today().isoformat(), "url": url,
-                            "kind": kind, "title": title})
+                            "kind": kind, "title": title or name0, "source": label})
             break
 
     browser.close()
