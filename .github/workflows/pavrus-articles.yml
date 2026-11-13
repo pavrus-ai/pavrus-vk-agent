@@ -36,6 +36,7 @@ jobs:
 
       - name: Запустите pavrus-articles-agent
         env:
+          PAVRUS_COOKIES: ${{ secrets.PAVRUS_COOKIES }}
           GIGACHAT_CLIENT_ID1: ${{ secrets.GIGACHAT_CLIENT_ID1 }}
           GIGACHAT_CLIENT_SECRET1: ${{ secrets.GIGACHAT_CLIENT_SECRET1 }}
           GROQ_KEY: ${{ secrets.GROQ_KEY }}
