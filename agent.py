@@ -8,24 +8,22 @@ urllib3.disable_warnings()
 # ============================================================
 VK_TOKEN = os.environ.get("VK_TOKEN", "").strip()
 VK_USER_TOKEN = os.environ.get("VK_USER_TOKEN", "").strip()
-VK_SERVICE_TOKEN = os.environ.get("VK_SERVICE_TOKEN", "").strip()   # v58: сервисный ключ (если есть готовый)
-VK_APP_ID = os.environ.get("VK_APP_ID", "").strip()                 # v58: или пара app_id+secret
-VK_APP_SECRET = os.environ.get("VK_APP_SECRET", "").strip()         #     для client_credentials
+VK_SERVICE_TOKEN = os.environ.get("VK_SERVICE_TOKEN", "").strip()
+VK_APP_ID = os.environ.get("VK_APP_ID", "").strip()
+VK_APP_SECRET = os.environ.get("VK_APP_SECRET", "").strip()
 VK_GROUP_ID = os.environ.get("VK_GROUP_ID", "").strip().lstrip("-")
 VK_ALBUM_ID = os.environ.get("VK_ALBUM_ID", "").strip()
 TG_BOT = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
 TG_CHAT = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
 GIGACHAT_CLIENT_ID = os.environ.get("GIGACHAT_CLIENT_ID1", "").strip()
 GIGACHAT_CLIENT_SECRET = os.environ.get("GIGACHAT_CLIENT_SECRET1", "").strip()
-
 SITE = "https://pavrus.ru"
 HISTORY = "history_vk.json"
 CACHE = "sitemap_cache.json"
-API_NEW = "https://api.vk.ru/method/"    # v58: новый хост + Bearer (по документации)
-API_OLD = "https://api.vk.com/method/"   # резерв
+API_NEW = "https://api.vk.ru/method/"
+API_OLD = "https://api.vk.com/method/"
 VK_V = "5.199"
 STRICT_IMAGE = os.environ.get("STRICT_IMAGE", "1").strip() != "0"
-
 BRAND_SLUGS = ["pavrus", "htdz", "ht-dz", "chartu", "restmoment", "rest-moment"]
 BL = ["корзин", "кабинет", "избранн", "сравнени", "войти", "заказать звонок",
       "санкт-петербург", "москва", "новосибирск", "8 (800", "info@", "показать еще",
@@ -33,7 +31,6 @@ BL = ["корзин", "кабинет", "избранн", "сравнени", "�
       "выбрано максимальное", "доступное для заказа", "количество товара",
       "цена:", "руб", "₽", "купить", "оформить заказ", "в наличии", "под заказ",
       "артикул", "арт.", "гаранти", "доставк", "cookie", "политик"]
-
 ANTI_SLOP_REPLACEMENTS = {
     "представляет собой": "", "является": "", "стоит отметить": "",
     "важно понимать": "", "безусловно": "", "в современном мире": "",
@@ -52,62 +49,85 @@ def clean_slop(text):
 def log(msg):
     print(msg, flush=True)
 
-log("pavrus-vk-agent v58 (матрица проб методов загрузки; сервисный ключ; Bearer api.vk.ru; цепочка album->wall->messages->docs)")
+log("pavrus-vk-agent v59 (free CORS-proxy вместо Playwright; матрица проб; сервисный ключ; Bearer api.vk.ru)")
 
 # ============================================================
-# PLAYWRIGHT
+# БЕСПЛАТНЫЕ CORS-ПРОКСИ (вместо Playwright)
 # ============================================================
-_pw_browser = None
-_pw_context = None
+PROXY_CHAIN = [
+    ("allorigins", lambda u: f"https://api.allorigins.win/raw?url={requests.utils.quote(u)}"),
+    ("corsproxy.io", lambda u: f"https://corsproxy.io/?{requests.utils.quote(u)}"),
+    ("codetabs", lambda u: f"https://api.codetabs.com/v1/proxy?quest={requests.utils.quote(u)}"),
+]
 
-def pw_init():
-    global _pw_browser, _pw_context
+def fetch_page_via_proxy(url):
+    """
+    v59: получает HTML страницы через цепочку бесплатных CORS-прокси.
+    Обходит блок IP GitHub (KillBot видит IP прокси, а не Azure).
+    Возвращает HTML или None.
+    """
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+    
+    # Пробуем каждый прокси по очереди
+    for name, url_builder in PROXY_CHAIN:
+        try:
+            proxy_url = url_builder(url)
+            log(f"🔄 Пробую прокси {name}: {url[:60]}...")
+            r = requests.get(proxy_url, timeout=30, headers=headers)
+            
+            if r.status_code == 200 and len(r.text) > 3000:
+                # Проверка на заглушку KillBot (на случай, если прокси тоже в блоке)
+                low = r.text.lower()
+                if "killbot" in low or "подтверждение пользователя" in low or "beget=begetok" in low:
+                    log(f"⚠️ {name}: вернул заглушку KillBot, пробую следующий")
+                    continue
+                
+                log(f"✅ {name}: успешно вернул HTML ({len(r.text)} байт)")
+                return r.text
+            else:
+                log(f"⚠️ {name}: HTTP {r.status_code}, len={len(r.text)}")
+        except Exception as e:
+            log(f"⚠️ {name}: ошибка {str(e)[:80]}")
+    
+    # Fallback: прямой запрос (на случай, если KillBot не блокирует)
     try:
-        from playwright.sync_api import sync_playwright
-        pw = sync_playwright().start()
-        _pw_browser = pw.chromium.launch(headless=True)
-        _pw_context = _pw_browser.new_context(
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-            locale="ru-RU"
-        )
-        log("Playwright Chromium запущен")
-        return True
+        log(f"🔄 Fallback: прямой запрос к {url[:60]}...")
+        r = requests.get(url, timeout=30, headers=headers)
+        if r.status_code == 200 and len(r.text) > 3000:
+            low = r.text.lower()
+            if "killbot" not in low and "подтверждение" not in low:
+                log(f"✅ Прямой запрос: успешно ({len(r.text)} байт)")
+                return r.text
     except Exception as e:
-        log(f"Playwright недоступен: {e}")
-        return False
-
-def pw_get_page(url):
-    if not _pw_context:
-        return None
-    try:
-        page = _pw_context.new_page()
-        page.goto(url, timeout=30000, wait_until="networkidle")
-        content = page.content()
-        page.close()
-        log(f"Playwright GET {url} -> {len(content)} байт")
-        return content
-    except Exception as e:
-        log(f"Playwright ошибка: {url} -> {e}")
-        return None
-
-def pw_get_image(url, referer):
-    if not _pw_context:
-        return None
-    try:
-        resp = _pw_context.request.get(url, headers={"Referer": referer})
-        if resp.ok and len(resp.body()) > 5000:
-            return resp.body()
-    except Exception:
-        pass
+        log(f"⚠️ Прямой запрос: ошибка {str(e)[:80]}")
+    
+    log(f"❌ Все прокси и прямой запрос не сработали для {url}")
     return None
 
-def pw_close():
-    global _pw_browser, _pw_context
+def fetch_image_via_proxy(url, referer):
+    """Скачивает картинку через прокси (если обычный requests не сработает)."""
+    headers = {"User-Agent": "Mozilla/5.0", "Referer": referer}
+    
+    # Сначала пробуем прямой запрос (картинки обычно не блокируются)
     try:
-        if _pw_browser:
-            _pw_browser.close()
+        r = requests.get(url, timeout=20, headers=headers)
+        if r.status_code == 200 and len(r.content) > 5000:
+            return r.content
     except Exception:
         pass
+    
+    # Fallback: через прокси
+    for name, url_builder in PROXY_CHAIN:
+        try:
+            proxy_url = url_builder(url)
+            r = requests.get(proxy_url, timeout=30, headers=headers)
+            if r.status_code == 200 and len(r.content) > 5000:
+                log(f"✅ Картинка через {name}: {len(r.content)} байт")
+                return r.content
+        except Exception:
+            continue
+    
+    return None
 
 # ============================================================
 # ХЕЛПЕРЫ
@@ -148,6 +168,7 @@ def parse_text(r):
         m = re.search(r"<title[^>]*>(.*?)</title>", r, re.S | re.I)
         h1 = clean(m.group(1)) if m else ""
     h1 = re.split(r"\s*[—|]\s*", h1)[0].strip()
+    
     desc = ""
     for pat in (r'<meta[^>]+name=["\']description["\'][^>]+content=["\'](.*?)["\']',
                 r'<meta[^>]+content=["\'](.*?)["\'][^>]+name=["\']description["\']'):
@@ -156,13 +177,15 @@ def parse_text(r):
             desc = clean(dm.group(1))
             if desc:
                 break
-    tail = re.sub(r"<script[^>]*>.*?</script>", " ", r, flags=re.S | re.I)
-    tail = re.sub(r"<style[^>]*>.*?</style>", " ", tail, flags=re.S | re.I)
+    
+    tail = re.sub(r"<script[^>]*>.*?</script>", "  ", r, flags=re.S | re.I)
+    tail = re.sub(r"<style[^>]*>.*?</style>", "  ", tail, flags=re.S | re.I)
     chunks = re.findall(r"<p[^>]*>(.*?)</p>", tail, re.S | re.I)
-    raw = " ".join(clean(c) for c in chunks)
+    raw = "  ".join(clean(c) for c in chunks)
+    
     seen = set()
     keep = []
-    for s in raw.split(". "):
+    for s in raw.split(".  "):
         s = s.strip()
         if len(s) < 30 or "{" in s:
             continue
@@ -171,7 +194,8 @@ def parse_text(r):
             continue
         seen.add(low)
         keep.append(s)
-    return h1, desc, ". ".join(keep)[:2000]
+    
+    return h1, desc, ".  ".join(keep)[:2000]
 
 def parse_gallery(r):
     out, seen = [], set()
@@ -179,7 +203,7 @@ def parse_gallery(r):
         for attr in ("href", "data-src", "src"):
             am = re.search(attr + r'\s*=\s*["\']([^"\']+)["\']', m.group(0), re.I)
             if am and am.group(1).strip():
-                u = am.group(1).split(",")[0].strip().split(" ")[0]
+                u = am.group(1).split(",")[0].strip().split("  ")[0]
                 if u.startswith("//"):
                     u = "https:" + u
                 elif u.startswith("/"):
@@ -187,20 +211,13 @@ def parse_gallery(r):
                 if u not in seen:
                     seen.add(u)
                     out.append(u)
-                break
+                    break
     return out
 
 def choose_image(imgs, referer):
     best, best_px = None, 0
     for u in imgs[:15]:
-        img_data = pw_get_image(u, referer)
-        if not img_data:
-            try:
-                rs = requests.get(u, timeout=20, headers={"User-Agent": "Mozilla/5.0", "Referer": referer})
-                if rs.status_code == 200 and len(rs.content) > 5000:
-                    img_data = rs.content
-            except Exception:
-                continue
+        img_data = fetch_image_via_proxy(u, referer)
         if img_data:
             try:
                 im = Image.open(io.BytesIO(img_data))
@@ -249,7 +266,6 @@ def ai_call(prompt, minlen=700):
 _SERVICE_TOKEN_CACHE = None
 
 def get_service_token():
-    """v58: сервисный ключ — готовый из секрета или через client_credentials."""
     global _SERVICE_TOKEN_CACHE
     if VK_SERVICE_TOKEN:
         return VK_SERVICE_TOKEN
@@ -258,10 +274,8 @@ def get_service_token():
     if VK_APP_ID and VK_APP_SECRET:
         try:
             r = requests.get("https://oauth.vk.com/token",
-                             params={"grant_type": "client_credentials",
-                                     "client_id": VK_APP_ID,
-                                     "client_secret": VK_APP_SECRET,
-                                     "v": "5.131"}, timeout=30).json()
+                params={"grant_type": "client_credentials", "client_id": VK_APP_ID,
+                        "client_secret": VK_APP_SECRET, "v": "5.131"}, timeout=30).json()
             tok = r.get("access_token")
             if tok:
                 log("✅ Сервисный ключ получен через client_credentials")
@@ -310,7 +324,6 @@ def vk_call(method, params, token, retries=5):
     return None
 
 def vk_probe(method, params, token):
-    """v58: тихая проба для матрицы прав (без шума в логе)."""
     p = dict(params or {})
     p["v"] = VK_V
     try:
@@ -322,7 +335,6 @@ def vk_probe(method, params, token):
         return False, str(e)[:40]
 
 def token_pool():
-    """v58: все доступные токены в порядке приоритета."""
     pool = []
     if VK_TOKEN:
         pool.append(("group", VK_TOKEN))
@@ -334,7 +346,6 @@ def token_pool():
     return pool
 
 def vk_probes():
-    """v58: матрица проб — какие методы загрузки живы на каком токене."""
     methods = [
         ("photos.getWallUploadServer", {"group_id": VK_GROUP_ID}),
         ("photos.getUploadServer", {"album_id": VK_ALBUM_ID, "group_id": VK_GROUP_ID} if VK_ALBUM_ID else None),
@@ -370,16 +381,14 @@ def vk_health():
 def _upload_album(img_bytes, token, tname):
     if not VK_ALBUM_ID:
         return None
-    srv = vk_call("photos.getUploadServer",
-                  {"album_id": VK_ALBUM_ID, "group_id": VK_GROUP_ID}, token, retries=2)
+    srv = vk_call("photos.getUploadServer", {"album_id": VK_ALBUM_ID, "group_id": VK_GROUP_ID}, token, retries=2)
     if not srv or "upload_url" not in srv:
         return None
     log(f"✅ [{tname}] шаг 1: upload_url альбома получен")
     r_json = None
     for field in ("file1", "file"):
         try:
-            r = requests.post(srv["upload_url"],
-                              files={field: ("product.jpg", img_bytes, "image/jpeg")}, timeout=120)
+            r = requests.post(srv["upload_url"], files={field: ("product.jpg", img_bytes, "image/jpeg")}, timeout=120)
             r_json = r.json()
             if r_json.get("photos_list"):
                 break
@@ -388,11 +397,10 @@ def _upload_album(img_bytes, token, tname):
     if not r_json or not r_json.get("photos_list"):
         return None
     log(f"✅ [{tname}] шаг 2: файл загружен, photos_list получен")
-    saved = vk_call("photos.save",
-                    {"album_id": VK_ALBUM_ID, "group_id": VK_GROUP_ID,
-                     "server": r_json.get("server", ""),
-                     "photos_list": r_json.get("photos_list", ""),
-                     "hash": r_json.get("hash", "")}, token, retries=2)
+    saved = vk_call("photos.save", {"album_id": VK_ALBUM_ID, "group_id": VK_GROUP_ID,
+                                     "server": r_json.get("server", ""),
+                                     "photos_list": r_json.get("photos_list", ""),
+                                     "hash": r_json.get("hash", "")}, token, retries=2)
     if not saved:
         return None
     p = saved[0]
@@ -412,16 +420,14 @@ def _upload_wall(img_bytes, token, tname):
         return None
     for attempt in range(2):
         try:
-            r = requests.post(srv["upload_url"],
-                              files={"photo": ("product.jpg", img_bytes, "image/jpeg")}, timeout=120)
+            r = requests.post(srv["upload_url"], files={"photo": ("product.jpg", img_bytes, "image/jpeg")}, timeout=120)
             r_json = r.json()
             if not r_json.get("photo"):
                 time.sleep(5)
                 continue
-            saved = vk_call("photos.saveWallPhoto",
-                            {"group_id": VK_GROUP_ID, "photo": r_json["photo"],
-                             "server": r_json.get("server", ""), "hash": r_json.get("hash", "")},
-                            token, retries=2)
+            saved = vk_call("photos.saveWallPhoto", {"group_id": VK_GROUP_ID, "photo": r_json["photo"],
+                                                      "server": r_json.get("server", ""),
+                                                      "hash": r_json.get("hash", "")}, token, retries=2)
             if saved:
                 p = saved[0]
                 att = f"photo{p['owner_id']}_{p['id']}"
@@ -439,14 +445,12 @@ def _upload_messages(img_bytes, token, tname):
     if not srv or "upload_url" not in srv:
         return None
     try:
-        r = requests.post(srv["upload_url"],
-                          files={"photo": ("product.jpg", img_bytes, "image/jpeg")}, timeout=120)
+        r = requests.post(srv["upload_url"], files={"photo": ("product.jpg", img_bytes, "image/jpeg")}, timeout=120)
         r_json = r.json()
         if not r_json.get("photo"):
             return None
-        saved = vk_call("photos.saveMessagesPhoto",
-                        {"photo": r_json["photo"], "server": r_json.get("server", ""),
-                         "hash": r_json.get("hash", "")}, token, retries=2)
+        saved = vk_call("photos.saveMessagesPhoto", {"photo": r_json["photo"], "server": r_json.get("server", ""),
+                                                      "hash": r_json.get("hash", "")}, token, retries=2)
         if saved:
             p = saved[0]
             att = f"photo{p['owner_id']}_{p['id']}"
@@ -463,8 +467,7 @@ def _upload_docs(img_bytes, token, tname):
     if not srv or "upload_url" not in srv:
         return None
     try:
-        r = requests.post(srv["upload_url"],
-                          files={"file": ("product.jpg", img_bytes, "image/jpeg")}, timeout=120)
+        r = requests.post(srv["upload_url"], files={"file": ("product.jpg", img_bytes, "image/jpeg")}, timeout=120)
         r_json = r.json()
         if not r_json.get("file"):
             return None
@@ -479,7 +482,6 @@ def _upload_docs(img_bytes, token, tname):
     return None
 
 def vk_upload(img_bytes):
-    """v58: для каждого токена (group -> service -> user) пробуем 4 пути загрузки."""
     if not img_bytes:
         log("Нет данных картинки для загрузки!")
         return None
@@ -489,15 +491,15 @@ def vk_upload(img_bytes):
         log(f"Формат: {im.format}, Размер: {im.size[0]}x{im.size[1]}, Режим: {im.mode}")
         if im.mode != 'RGB':
             im = im.convert('RGB')
-            buf = io.BytesIO()
-            im.save(buf, "JPEG", quality=90)
-            img_bytes = buf.getvalue()
-            log("Конвертировано в RGB/JPEG")
+        buf = io.BytesIO()
+        im.save(buf, "JPEG", quality=90)
+        img_bytes = buf.getvalue()
+        log("Конвертировано в RGB/JPEG")
     except Exception as e:
         log(f"Ошибка проверки картинки: {e}")
     for tname, tok in token_pool():
-        for path_name, path_fn in (("album", _upload_album), ("wall", _upload_wall),
-                                   ("messages", _upload_messages), ("docs", _upload_docs)):
+        for path_name, path_fn in (("messages", _upload_messages), ("wall", _upload_wall),
+                                    ("album", _upload_album), ("docs", _upload_docs)):
             att = path_fn(img_bytes, tok, tname)
             if att:
                 return att
@@ -546,7 +548,7 @@ def tg_post(img_bytes, caption):
         log(f"TG error: {r}")
 
 # ============================================================
-# ГЛАВНАЯ ЛОГИКА v58
+# ГЛАВНАЯ ЛОГИКА v59 (free proxy вместо Playwright)
 # ============================================================
 def main():
     vk_health()
@@ -560,40 +562,38 @@ def main():
     except FileNotFoundError:
         log(f"Файл {CACHE} не найден!")
         sys.exit(1)
-
+    
     cand = [u for u in urls if brand_in_url(u)]
     log(f"URL с брендом: {len(cand)} из {len(urls)}")
     if not cand:
         log("Нет URL с брендами")
         sys.exit(1)
-
+    
     try:
         hist = set(json.load(open(HISTORY, encoding="utf-8"))) if os.path.exists(HISTORY) else set()
     except Exception:
         hist = set()
+    
     avail = [u for u in cand if u not in hist] or cand
     random.shuffle(avail)
-
-    pw_ok = pw_init()
+    
     page = title = desc = body = None
     img = None
+    
     for i, u in enumerate(avail[:12]):
-        if pw_ok:
-            r_text = pw_get_page(u)
-        else:
-            try:
-                rs = requests.get(u, timeout=30, headers={"User-Agent": "Mozilla/5.0"})
-                r_text = rs.text if rs.status_code == 200 else None
-            except Exception:
-                r_text = None
+        # v59: используем free proxy вместо Playwright
+        r_text = fetch_page_via_proxy(u)
+        
         if not r_text or len(r_text) < 3000:
             continue
         if "beget=begetok" in r_text:
             log(f"Заглушка Beget на {u}")
             continue
+        
         title, desc, body = parse_text(r_text)
         if not title or (len(body) + len(desc)) < 40:
             continue
+        
         imgs = parse_gallery(r_text)
         img = choose_image(imgs, u) if imgs else None
         if img:
@@ -601,12 +601,11 @@ def main():
             page = u
             log(f"Товар: {title[:60]}")
             break
-    pw_close()
-
+    
     if not page:
         log("Не найдена подходящая страница")
         sys.exit(1)
-
+    
     prompt = (
         f"Напиши пост о товаре для ВКонтакте, Telegram и Дзена.\n\n"
         f"ТОВАР: {title}\n"
@@ -625,14 +624,17 @@ def main():
         f"'в современном мире', 'стоит отметить', 'важно понимать', 'безусловно', 'играет ключевую роль', "
         f"'представляет собой', 'является'. Пиши как живой эксперт-практик."
     )
+    
     text = ai_call(prompt, 700)
     if not text:
         text = f"Современное оборудование для конференц-залов и масштабных мероприятий.\n\n{desc}\n\nНапишите нам в сообщения группы — расскажем подробнее!"
+    
     text = clean_slop(text)
     text = text.replace("**", "").replace("##", "").strip()
     text = re.sub(r"https?://\S+", "", text)
     text = re.sub(r"pavrus\.ru\S*", "", text, flags=re.I)
     text = re.sub(r"Подробнее:\s*", "", text, flags=re.I)
+    
     lines = text.split('\n')
     cleaned = []
     for line in lines:
@@ -643,30 +645,34 @@ def main():
             continue
         cleaned.append(line)
     text = '\n'.join(cleaned).strip()
+    
     if len(text) < 300:
         log(f"⚠️ Текст после чистки выродился ({len(text)} симв.) — собираю запасной из описания")
         text = (f"{desc}\n\n"
                 f"Сценарии применения: конференц-залы, презентации, выездные мероприятия. "
                 f"Оборудование PAVRUS выбирают за стабильность связи и простую интеграцию "
                 f"в существующую инфраструктуру.")
+    
     if "Напишите нам" not in text:
         text += "\n\nНапишите нам в сообщения группы — расскажем подробнее!"
+    
     if len(text) > 1000:
         cut_pos = text.rfind('.', 0, 940)
         if cut_pos > 750:
             text = text[:cut_pos + 1] + "\n\nНапишите нам в сообщения группы — расскажем подробнее!"
         else:
             text = text[:1000]
+    
     log(f"Текст поста: {len(text)} симв.")
-
+    
     att = vk_upload(img) if img else None
     log(f"Attachment для ВК: {att if att else 'None'}")
-
+    
     if not att and STRICT_IMAGE:
         log("❌ STRICT_IMAGE: картинку загрузить не удалось — пост БЕЗ фото не публикуем, "
             "URL остаётся в очереди на следующий запуск")
         sys.exit(1)
-
+    
     if vk_post(text, att):
         hist.add(page)
         json.dump(sorted(hist), open(HISTORY, "w", encoding="utf-8"), ensure_ascii=False)
@@ -676,7 +682,7 @@ def main():
     else:
         log("ВК: публикация не удалась (URL не помечен отправленным)")
         sys.exit(1)
-
+    
     log("=" * 50)
     log("FINISH: товар -> ВК + TG (один пост, с картинкой)")
     log("=" * 50)
