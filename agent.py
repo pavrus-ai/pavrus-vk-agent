@@ -55,9 +55,9 @@ log("pavrus-vk-agent v59 (free CORS-proxy вместо Playwright; матриц�
 # БЕСПЛАТНЫЕ CORS-ПРОКСИ (вместо Playwright)
 # ============================================================
 PROXY_CHAIN = [
-    ("allorigins", lambda u: f"https://api.allorigins.win/raw?url={requests.utils.quote(u)}"),
-    ("corsproxy.io", lambda u: f"https://corsproxy.io/?{requests.utils.quote(u)}"),
     ("codetabs", lambda u: f"https://api.codetabs.com/v1/proxy?quest={requests.utils.quote(u)}"),
+    ("corsproxy.io", lambda u: f"https://corsproxy.io/?{requests.utils.quote(u)}"),
+    ("allorigins", lambda u: f"https://api.allorigins.win/raw?url={requests.utils.quote(u)}"),
 ]
 
 def fetch_page_via_proxy(url):
@@ -68,19 +68,31 @@ def fetch_page_via_proxy(url):
     """
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
     
-    # Пробуем каждый прокси по очереди
     for name, url_builder in PROXY_CHAIN:
         try:
-            proxy_url = url_builder(url)
+            # Уникальный параметр обходит кеш прокси
+            cache_buster = f"_t={int(time.time())}"
+            sep = "&" if "?" in url else "?"
+            url_with_buster = url + sep + cache_buster
+            proxy_url = url_builder(url_with_buster)
+            
             log(f"🔄 Пробую прокси {name}: {url[:60]}...")
             r = requests.get(proxy_url, timeout=30, headers=headers)
             
             if r.status_code == 200 and len(r.text) > 3000:
-                # Проверка на заглушку KillBot (на случай, если прокси тоже в блоке)
                 low = r.text.lower()
                 if "killbot" in low or "подтверждение пользователя" in low or "beget=begetok" in low:
                     log(f"⚠️ {name}: вернул заглушку KillBot, пробую следующий")
                     continue
+                
+                # Диагностика: подозрительно одинаковый размер (кешированная главная)
+                if len(r.text) == 154779:
+                    log(f"⚠️ {name}: размер 154779 байт — вероятно, кешированная главная, пропускаю")
+                    continue
+                
+                # Диагностика: первые 200 символов
+                snippet = r.text[:200].replace("\n", " ")
+                log(f"🔍 {name} HTML начало: {snippet}")
                 
                 log(f"✅ {name}: успешно вернул HTML ({len(r.text)} байт)")
                 return r.text
@@ -89,7 +101,7 @@ def fetch_page_via_proxy(url):
         except Exception as e:
             log(f"⚠️ {name}: ошибка {str(e)[:80]}")
     
-    # Fallback: прямой запрос (на случай, если KillBot не блокирует)
+    # Fallback: прямой запрос
     try:
         log(f"🔄 Fallback: прямой запрос к {url[:60]}...")
         r = requests.get(url, timeout=30, headers=headers)
@@ -119,7 +131,10 @@ def fetch_image_via_proxy(url, referer):
     # Fallback: через прокси
     for name, url_builder in PROXY_CHAIN:
         try:
-            proxy_url = url_builder(url)
+            cache_buster = f"_t={int(time.time())}"
+            sep = "&" if "?" in url else "?"
+            url_with_buster = url + sep + cache_buster
+            proxy_url = url_builder(url_with_buster)
             r = requests.get(proxy_url, timeout=30, headers=headers)
             if r.status_code == 200 and len(r.content) > 5000:
                 log(f"✅ Картинка через {name}: {len(r.content)} байт")
@@ -377,7 +392,7 @@ def vk_health():
     log(f"🩺 VK_ALBUM_ID: {VK_ALBUM_ID if VK_ALBUM_ID else 'не задан'}")
     vk_probes()
 
-# ---------- пути загрузки (v58: четыре пути, первый живой побеждает) ----------
+# ---------- пути загрузки ----------
 def _upload_album(img_bytes, token, tname):
     if not VK_ALBUM_ID:
         return None
